@@ -1,0 +1,65 @@
+name: Rust
+
+on:
+  push:
+    branches: [fprime-rs, master, devel]
+    paths:
+      - "Rust/**"
+      - "tools/fprime-rs/**"
+      - "default/config/FpConfig.fpp"
+      - "default/config/FpConstants.fpp"
+      - "default/config/ComCfg.fpp"
+      - "cmake/platform/unix/Platform/PlatformTypes.fpp"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    branches: [fprime-rs, master, devel]
+    paths:
+      - "Rust/**"
+      - "tools/fprime-rs/**"
+      - "default/config/FpConfig.fpp"
+      - "default/config/FpConstants.fpp"
+      - "default/config/ComCfg.fpp"
+      - "cmake/platform/unix/Platform/PlatformTypes.fpp"
+      - ".github/workflows/rust.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: fmt, clippy, test, build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: Rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        # rustup reads Rust/rust-toolchain.toml (cwd-resolved) for the version
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace --exclude fprime-ffi --all-targets -- -D warnings
+      - name: Clippy (ffi staticlib)
+        run: cargo clippy -p fprime-ffi --lib -- -D warnings
+      - name: Test
+        run: cargo test --workspace --exclude fprime-ffi
+      - name: Build staticlib (release, panic=abort)
+        run: cargo build --release
+      - name: Generated config is up to date
+        working-directory: .
+        run: |
+          python3 tools/fprime-rs/gen_config.py \
+            --platform cmake/platform/unix/Platform/PlatformTypes.fpp \
+            --config default/config/FpConfig.fpp default/config/ComCfg.fpp \
+            --constants default/config/FpConstants.fpp \
+            --out /tmp/generated-config.rs \
+            --out-cpp /tmp/generated-check.cpp
+          diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
+          diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp

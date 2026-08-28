@@ -1,0 +1,14 @@
+[package]
+name = "fprime-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "extern \"C\" surface of the F Prime Rust crates, built as libfprime_rust.a"
+
+[lib]
+name = "fprime_rust"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+fprime-config = { path = "../fprime-config" }
+fprime-core = { path = "../fprime-core" }

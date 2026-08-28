@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["fprime-config", "fprime-core", "fprime-ffi"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/PooyaEimandar/fprime"
+
+# Flight rule: no unwinding, ever.
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+# Dev builds of the no_std staticlib also must not unwind. 
+[profile.dev]
+panic = "abort"

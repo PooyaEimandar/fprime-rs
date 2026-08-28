@@ -16,3 +16,6 @@ register_fprime_project()
 # carried by every F Prime target, set up in cmake/flags.cmake.
 fprime_add_validation_flags()
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/FPrime-Code.cmake")
+
+# Rust crates and their C++ interop shims
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Rust/")
