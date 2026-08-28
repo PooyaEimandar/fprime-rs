@@ -1,0 +1,10 @@
+[package]
+name = "fprime-svc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust implementations of F Prime service-component logic (FprimeDeframer, FprimeFramer)"
+
+[dependencies]
+fprime-config = { path = "../fprime-config" }
+fprime-utils = { path = "../fprime-utils" }

@@ -11,6 +11,7 @@ register_fprime_module(
     HEADERS
         "${CMAKE_CURRENT_LIST_DIR}/RustCodec.h"
         "${CMAKE_CURRENT_LIST_DIR}/RustUtils.h"
+        "${CMAKE_CURRENT_LIST_DIR}/RustSvc.h"
     DEPENDS
         Fw_Types
 )

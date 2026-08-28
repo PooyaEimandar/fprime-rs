@@ -12,4 +12,5 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 fprime-config = { path = "../fprime-config" }
 fprime-core = { path = "../fprime-core" }
+fprime-svc = { path = "../fprime-svc" }
 fprime-utils = { path = "../fprime-utils" }

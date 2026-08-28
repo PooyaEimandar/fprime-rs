@@ -23,6 +23,8 @@ option(FPRIME_ENABLE_RUST "Build the fprime-rs Rust components" ON)
 option(FPRIME_RUST_IMPL_UTILS_TYPES "Use the Rust CircularBuffer engine" ON)
 option(FPRIME_RUST_IMPL_UTILS_HASH "Use the Rust CRC32 implementation" ON)
 option(FPRIME_RUST_IMPL_CFDP_CHECKSUM "Use the Rust CFDP checksum" ON)
+option(FPRIME_RUST_IMPL_SVC_FPRIME_DEFRAMER "Use the Rust FprimeDeframer logic" ON)
+option(FPRIME_RUST_IMPL_SVC_FPRIME_FRAMER "Use the Rust FprimeFramer logic" ON)
 
 set(FPRIME_RS_AVAILABLE FALSE)
 if (FPRIME_ENABLE_RUST)

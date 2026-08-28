@@ -9,6 +9,8 @@ on:
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
+      - "Svc/FprimeDeframer/**"
+      - "Svc/FprimeFramer/**"
       - "CMakeLists.txt"
       - "cmake/**"
       - "default/config/FpConfig.fpp"
@@ -24,6 +26,8 @@ on:
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
+      - "Svc/FprimeDeframer/**"
+      - "Svc/FprimeFramer/**"
       - "CMakeLists.txt"
       - "cmake/**"
       - "default/config/FpConfig.fpp"
@@ -104,6 +108,6 @@ jobs:
       - name: Check Rust-backed modules
         run: |
           . fprime-venv/bin/activate
-          for dir in Rust Utils/Types Utils/Hash CFDP/Checksum; do
+          for dir in Rust Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer; do
             (cd "$dir" && fprime-util check -j4)
           done

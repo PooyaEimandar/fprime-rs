@@ -480,3 +480,96 @@ pub unsafe extern "C" fn fprime_rs_crc32_update(
 ) -> u32 {
     crc32::update(crc, view(data, length as usize))
 }
+
+// ---------------------------------------------------------------------------
+// Svc components: FprimeDeframer, FprimeFramer (Phase 2)
+// ---------------------------------------------------------------------------
+
+use fprime_config::FwPacketDescriptorType;
+use fprime_svc::{deframer, framer};
+
+/// Result of `fprime_rs_deframer_deframe`; field meanings mirror
+/// `fprime_svc::deframer::Deframed`. Layout must match FprimeRsDeframeResult
+/// in Rust/RustSvc.h.
+#[repr(C)]
+pub struct DeframeResultFfi {
+    /// deframer::Outcome as i32 (0 Ok, 1 too-short, 2 start word, 3 length, 4 CRC)
+    pub outcome: i32,
+    /// 1 when the PayloadTooShort WARNING_LO applies (outcomes 0 and 4)
+    pub payload_too_short: u8,
+    /// 1 when `descriptor` holds a packet descriptor read from the payload
+    pub has_descriptor: u8,
+    pub descriptor: FwPacketDescriptorType,
+}
+
+/// Validate one F Prime frame. Pure computation: the shim maps the result to
+/// events, context APID, buffer adjustment, and port emission.
+///
+/// # Safety
+/// `data` must point to `len` readable bytes (null allowed when `len` is 0);
+/// `result` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_deframer_deframe(
+    data: *const u8,
+    len: FwSizeType,
+    result: *mut DeframeResultFfi,
+) {
+    let deframed = deframer::deframe(view(data, len as usize));
+    *result = DeframeResultFfi {
+        outcome: deframed.outcome as i32,
+        payload_too_short: deframed.payload_too_short as u8,
+        has_descriptor: deframed.descriptor.is_some() as u8,
+        descriptor: deframed.descriptor.unwrap_or(0),
+    };
+}
+
+/// Frame storage view returned by the shim's allocator trampoline: the data
+/// pointer and size of the `Fw::Buffer` obtained from the component's
+/// `bufferAllocate` output port (null/0 when the port returned an invalid
+/// buffer). Layout must match FprimeRsByteView in Rust/RustSvc.h.
+#[repr(C)]
+pub struct ByteViewFfi {
+    pub ptr: *mut u8,
+    pub len: FwSizeType,
+}
+
+/// The shim's allocator trampoline: calls `bufferAllocate_out` on the
+/// component and reports the resulting buffer.
+pub type AllocFfi =
+    unsafe extern "C" fn(ctx: *mut core::ffi::c_void, size: FwSizeType) -> ByteViewFfi;
+
+/// Build an F Prime frame around `payload`, obtaining storage through the
+/// allocator — a synchronous, returning C++ port call made from inside Rust.
+/// Returns 0 with `*written` set on success; 1 when no adequate buffer was
+/// available (the shim owns the NoBufferAvailable event and cleanup, using
+/// the `Fw::Buffer` it captured in the trampoline context).
+///
+/// # Safety
+/// `payload` must point to `payload_len` readable bytes (null allowed when
+/// zero); `alloc` must be a valid trampoline for `ctx`; `written` must be a
+/// valid pointer. The allocated buffer must not overlap `payload`.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_framer_frame(
+    payload: *const u8,
+    payload_len: FwSizeType,
+    alloc: AllocFfi,
+    ctx: *mut core::ffi::c_void,
+    written: *mut FwSizeType,
+) -> i32 {
+    let payload = view(payload, payload_len as usize);
+    let result = framer::frame(payload, |size| {
+        let view = alloc(ctx, size);
+        if view.ptr.is_null() {
+            None
+        } else {
+            Some(view_mut(view.ptr, view.len as usize))
+        }
+    });
+    match result {
+        Ok(count) => {
+            *written = count as FwSizeType;
+            0
+        }
+        Err(framer::NoBuffer) => 1,
+    }
+}
