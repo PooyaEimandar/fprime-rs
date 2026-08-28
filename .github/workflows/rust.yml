@@ -6,6 +6,11 @@ on:
     paths:
       - "Rust/**"
       - "tools/fprime-rs/**"
+      - "Utils/Types/**"
+      - "Utils/Hash/**"
+      - "CFDP/Checksum/**"
+      - "CMakeLists.txt"
+      - "cmake/**"
       - "default/config/FpConfig.fpp"
       - "default/config/FpConstants.fpp"
       - "default/config/ComCfg.fpp"
@@ -16,6 +21,11 @@ on:
     paths:
       - "Rust/**"
       - "tools/fprime-rs/**"
+      - "Utils/Types/**"
+      - "Utils/Hash/**"
+      - "CFDP/Checksum/**"
+      - "CMakeLists.txt"
+      - "cmake/**"
       - "default/config/FpConfig.fpp"
       - "default/config/FpConstants.fpp"
       - "default/config/ComCfg.fpp"
@@ -63,3 +73,37 @@ jobs:
             --out-cpp /tmp/generated-check.cpp
           diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
           diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp
+
+  framework-check:
+    # Builds the C++ framework with the Rust implementations selected and runs
+    # the affected unit-test suites (the equivalence oracles): the codec
+    # differential UT plus the CircularBuffer/Queue, CRC32, and CFDP checksum
+    # suites, all against the Rust-backed modules, under ASan/UBSan.
+    name: fprime-util check (Rust-backed modules)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install pinned Rust toolchain
+        working-directory: Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install fprime tools
+        run: |
+          python3 -m venv fprime-venv
+          . fprime-venv/bin/activate
+          pip install -q -r requirements.txt
+      - name: Generate UT build cache
+        run: |
+          . fprime-venv/bin/activate
+          fprime-util generate --ut
+      - name: Check Rust-backed modules
+        run: |
+          . fprime-venv/bin/activate
+          for dir in Rust Utils/Types Utils/Hash CFDP/Checksum; do
+            (cd "$dir" && fprime-util check -j4)
+          done

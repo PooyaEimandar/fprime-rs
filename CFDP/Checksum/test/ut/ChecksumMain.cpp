@@ -48,6 +48,53 @@ TEST(Checksum, ThreePackets) {
     ASSERT_EQ(expectedValue, checksum.getValue());
 }
 
+TEST(Checksum, ByteAtATime) {
+    // Any partition of the data must sum identically, down to single bytes
+    Checksum checksum;
+    for (U32 i = 0; i < 8; i++) {
+        checksum.update(&data[i], i, 1);
+    }
+    ASSERT_EQ(expectedValue, checksum.getValue());
+}
+
+TEST(Checksum, OffsetDeterminesBytePosition) {
+    // The same byte contributes differently depending on its file offset:
+    // offset 0 is the most significant byte of a word, offset 3 the least
+    Checksum atZero;
+    atZero.update(&data[1], 0, 1);  // data[1] == 1
+    ASSERT_EQ(static_cast<U32>(1) << 24, atZero.getValue());
+
+    Checksum atThree;
+    atThree.update(&data[1], 3, 1);
+    ASSERT_EQ(static_cast<U32>(1), atThree.getValue());
+}
+
+TEST(Checksum, WrappingAddition) {
+    // The CFDP checksum is a modular 32-bit sum: overflow wraps silently
+    const U8 ones[4] = {0xFF, 0xFF, 0xFF, 0xFF};
+    Checksum checksum(0xFFFFFFFFu);
+    checksum.update(ones, 0, 4);
+    ASSERT_EQ(0xFFFFFFFEu, checksum.getValue());
+}
+
+TEST(Checksum, ShortFirstWordAtUnalignedOffset) {
+    // length smaller than the distance to the next word boundary
+    Checksum checksum;
+    checksum.update(&data[1], 1, 1);  // one byte at offset 1: position 1 of a word
+    ASSERT_EQ(static_cast<U32>(data[1]) << 16, checksum.getValue());
+}
+
+TEST(Checksum, ConstructorsAndComparison) {
+    Checksum a(42);
+    Checksum b(a);
+    Checksum c;
+    ASSERT_EQ(a.getValue(), 42u);
+    ASSERT_TRUE(a == b);
+    ASSERT_TRUE(a != c);
+    c = a;
+    ASSERT_TRUE(a == c);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

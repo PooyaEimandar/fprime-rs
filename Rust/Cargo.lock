@@ -19,4 +19,13 @@ version = "0.1.0"
 dependencies = [
  "fprime-config",
  "fprime-core",
+ "fprime-utils",
+]
+
+[[package]]
+name = "fprime-utils"
+version = "0.1.0"
+dependencies = [
+ "fprime-config",
+ "fprime-core",
 ]

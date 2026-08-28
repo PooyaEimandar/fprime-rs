@@ -6,12 +6,20 @@
 #
 ####
 
+# fprime-rs: the CRC32 kernel has a Rust implementation behind the unchanged
+# header; FPRIME_RUST_IMPL_UTILS_HASH selects it (see Rust/enable.cmake).
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_UTILS_HASH)
+    set(CRC32_IMPL "${CMAKE_CURRENT_LIST_DIR}/Crc32/Crc32Rust.cpp")
+else()
+    set(CRC32_IMPL "${CMAKE_CURRENT_LIST_DIR}/Crc32/Crc32.cpp")
+endif()
+
 register_fprime_library(
     SOURCES
         "${CMAKE_CURRENT_LIST_DIR}/HashBufferCommon.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/HashCommon.cpp"
 
-        "${CMAKE_CURRENT_LIST_DIR}/Crc32/Crc32.cpp"
+        "${CRC32_IMPL}"
         "${CMAKE_CURRENT_LIST_DIR}/Crc32/HashImpl.cpp"
 
         # Only provided to satisfy CCSDS
@@ -28,6 +36,10 @@ register_fprime_library(
     DEPENDS
         Fw_Types
 )
+
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_UTILS_HASH AND NOT FPRIME_IS_SUB_BUILD)
+    target_link_libraries(Utils_Hash PUBLIC fprime_rust)
+endif()
 
 register_fprime_ut(
     SOURCES

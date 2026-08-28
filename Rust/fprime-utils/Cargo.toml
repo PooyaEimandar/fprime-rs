@@ -1,0 +1,10 @@
+[package]
+name = "fprime-utils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust implementations of F Prime utility libraries (CircularBuffer engine, CRC32, CFDP checksum)"
+
+[dependencies]
+fprime-config = { path = "../fprime-config" }
+fprime-core = { path = "../fprime-core" }

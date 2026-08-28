@@ -271,3 +271,212 @@ pub unsafe extern "C" fn fprime_rs_deser_bytes(
 #[cfg(not(test))]
 #[no_mangle]
 extern "C" fn rust_eh_personality() {}
+
+// ---------------------------------------------------------------------------
+// Utils: CircularBuffer engine, CRC32, CFDP checksum (Phase 1)
+// ---------------------------------------------------------------------------
+
+use fprime_config::FwSizeType;
+use fprime_utils::{checksum, circular, crc32};
+
+// The FFI converts FwSizeType (u64 per config) to usize with `as` casts. On a
+// 32-bit target that would silently truncate sizes; refuse to build until the
+// conversions are made checked (Phase 0/1 are host-only anyway).
+const _: () = assert!(core::mem::size_of::<usize>() >= core::mem::size_of::<FwSizeType>());
+
+/// # Safety
+/// All pointers must be valid for the C++ CircularBuffer object's fields:
+/// `store` points to `store_size` bytes (the ring storage), and `head`,
+/// `alloc`, `high` point to the object's index/size fields. Preconditions
+/// (setup called, non-null buffers) are FW_ASSERTed by the C++ shim.
+unsafe fn ring_mut<'a>(
+    store: *mut u8,
+    store_size: FwSizeType,
+    head: *mut FwSizeType,
+    alloc: *mut FwSizeType,
+    high: *mut FwSizeType,
+) -> circular::RingMut<'a> {
+    circular::RingMut {
+        store: view_mut(store, store_size as usize),
+        head_idx: &mut *head,
+        allocated_size: &mut *alloc,
+        high_water_mark: &mut *high,
+    }
+}
+
+/// Mirrors `CircularBuffer::serialize(const U8*, FwSizeType)`.
+///
+/// # Safety
+/// See [`ring_mut`]; `src` must point to `size` readable bytes and must NOT
+/// overlap the ring store (the shim FW_ASSERTs this; overlapping slices would
+/// be UB here where the C++ per-byte copy tolerated overlap).
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_serialize(
+    store: *mut u8,
+    store_size: FwSizeType,
+    head: *mut FwSizeType,
+    alloc: *mut FwSizeType,
+    high: *mut FwSizeType,
+    src: *const u8,
+    size: FwSizeType,
+) -> i32 {
+    let mut ring = ring_mut(store, store_size, head, alloc, high);
+    status_code(&ring.serialize(view(src, size as usize)))
+}
+
+/// Bookkeeping for the C++ shim's direct-write serialize path.
+///
+/// # Safety
+/// See [`ring_mut`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_commit(
+    store: *mut u8,
+    store_size: FwSizeType,
+    head: *mut FwSizeType,
+    alloc: *mut FwSizeType,
+    high: *mut FwSizeType,
+    size: FwSizeType,
+) -> i32 {
+    let mut ring = ring_mut(store, store_size, head, alloc, high);
+    ring.commit(size);
+    0
+}
+
+/// Mirrors `CircularBuffer::rotate`.
+///
+/// # Safety
+/// See [`ring_mut`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_rotate(
+    store: *mut u8,
+    store_size: FwSizeType,
+    head: *mut FwSizeType,
+    alloc: *mut FwSizeType,
+    high: *mut FwSizeType,
+    amount: FwSizeType,
+) -> i32 {
+    let mut ring = ring_mut(store, store_size, head, alloc, high);
+    status_code(&ring.rotate(amount))
+}
+
+/// Mirrors `CircularBuffer::trim`.
+///
+/// # Safety
+/// See [`ring_mut`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_trim(
+    store: *mut u8,
+    store_size: FwSizeType,
+    head: *mut FwSizeType,
+    alloc: *mut FwSizeType,
+    high: *mut FwSizeType,
+    amount: FwSizeType,
+) -> i32 {
+    let mut ring = ring_mut(store, store_size, head, alloc, high);
+    status_code(&ring.trim(amount))
+}
+
+/// Mirrors `CircularBuffer::peek(U8*, FwSizeType, FwSizeType)`.
+///
+/// # Safety
+/// `store` must point to `store_size` readable bytes; `out` to `size`
+/// writable bytes; `out` must NOT overlap the ring store (the shim FW_ASSERTs
+/// this).
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_peek_bytes(
+    store: *const u8,
+    store_size: FwSizeType,
+    head: FwSizeType,
+    alloc: FwSizeType,
+    offset: FwSizeType,
+    out: *mut u8,
+    size: FwSizeType,
+) -> i32 {
+    let ring = circular::RingRef {
+        store: view(store, store_size as usize),
+        head_idx: head,
+        allocated_size: alloc,
+    };
+    status_code(&ring.peek_bytes(view_mut(out, size as usize), offset))
+}
+
+/// Mirrors `CircularBuffer::peek(U8&, FwSizeType)`.
+///
+/// # Safety
+/// `store` must point to `store_size` readable bytes; `value` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_peek_u8(
+    store: *const u8,
+    store_size: FwSizeType,
+    head: FwSizeType,
+    alloc: FwSizeType,
+    offset: FwSizeType,
+    value: *mut u8,
+) -> i32 {
+    let ring = circular::RingRef {
+        store: view(store, store_size as usize),
+        head_idx: head,
+        allocated_size: alloc,
+    };
+    match ring.peek_u8(offset) {
+        Ok(v) => {
+            *value = v;
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Mirrors `CircularBuffer::peek(U32&, FwSizeType)` (big-endian).
+///
+/// # Safety
+/// `store` must point to `store_size` readable bytes; `value` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cb_peek_u32(
+    store: *const u8,
+    store_size: FwSizeType,
+    head: FwSizeType,
+    alloc: FwSizeType,
+    offset: FwSizeType,
+    value: *mut u32,
+) -> i32 {
+    let ring = circular::RingRef {
+        store: view(store, store_size as usize),
+        head_idx: head,
+        allocated_size: alloc,
+    };
+    match ring.peek_u32(offset) {
+        Ok(v) => {
+            *value = v;
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Mirrors `CFDP::Checksum::update`.
+///
+/// # Safety
+/// `value` must be valid; `data` must point to `length` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_cfdp_checksum_update(
+    value: *mut u32,
+    data: *const u8,
+    offset: u32,
+    length: u32,
+) {
+    checksum::update(&mut *value, view(data, length as usize), offset);
+}
+
+/// Mirrors `Utils::crc32_ieee802_3_update` (raw register, no complements).
+///
+/// # Safety
+/// `data` must point to `length` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_crc32_update(
+    data: *const u8,
+    length: FwSizeType,
+    crc: u32,
+) -> u32 {
+    crc32::update(crc, view(data, length as usize))
+}

@@ -8,8 +8,11 @@ mixed C++/Rust deployments working at every step.
 - [x] **Phase 0 — Skeleton**: cargo workspace, `fprime-config` generated from
       the FPP config, wire-compatible `no_std` codec, panic→`FW_ASSERT` bridge,
       CMake/cargo integration, differential UT green under `fprime-util check`
-- [ ] **Phase 1 — Foundation libraries**: `Utils` CircularBuffer/Queue/CRC32 and
-      CFDP checksum in Rust behind unchanged C++ headers, existing UTs as oracle
+- [x] **Phase 1 — Foundation libraries**: CircularBuffer byte engine, CRC32,
+      and CFDP checksum in Rust behind unchanged C++ headers, existing UTs as
+      oracle; per-module `FPRIME_RUST_IMPL_*` rollback switches proven both
+      ways (Queue's orchestration stays C++ atop the Rust engine — its header
+      encapsulation blocks direct porting until Phase 4 codegen)
 - [ ] **Phase 2 — First components**: `Svc/FprimeDeframer`, then
       `Svc/FprimeFramer` (hand-written shims); Ref GDS integration in a mixed
       deployment

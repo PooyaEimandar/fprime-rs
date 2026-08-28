@@ -15,6 +15,9 @@ register_fprime_project()
 # The flags F Prime *requires* in order to build are not listed here: they are usage requirements
 # carried by every F Prime target, set up in cmake/flags.cmake.
 fprime_add_validation_flags()
+# fprime-rs availability + cargo target, needed before framework modules that
+# may select Rust-backed implementation sources
+include("${CMAKE_CURRENT_LIST_DIR}/Rust/enable.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/FPrime-Code.cmake")
 
 # Rust crates and their C++ interop shims
