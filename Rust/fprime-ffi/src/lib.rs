@@ -729,3 +729,184 @@ pub unsafe extern "C" fn fprime_rs_router_table_take(
         None => -1,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Generated-type differential proof surface (Phase 4)
+// ---------------------------------------------------------------------------
+// These exercise the fpp-to-rust GENERATED types (not hand-written ones) so
+// the C++ differential test can prove their serialization is byte-identical
+// to the C++ code FPP autocodes from the same model.
+
+use fprime_svc::generated::fprime_protocol as gen_proto;
+
+/// Serialize a generated `Svc.FprimeProtocol.FrameHeader`.
+///
+/// # Safety
+/// `out` must point to `capacity` writable bytes (null allowed when 0);
+/// `written` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_gen_frameheader_ser(
+    start_word: u32,
+    length_field: u32,
+    mode: i32,
+    out: *mut u8,
+    capacity: FwSizeType,
+    written: *mut FwSizeType,
+) -> i32 {
+    let value = gen_proto::SvcFprimeProtocolFrameHeader {
+        startWord: start_word,
+        lengthField: length_field,
+    };
+    let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+    let result = value.serialize_to(&mut buf, endianness(mode));
+    *written = buf.len() as FwSizeType;
+    status_code(&result)
+}
+
+/// Deserialize a generated `Svc.FprimeProtocol.FrameHeader`.
+///
+/// # Safety
+/// `bytes` must point to `len` readable bytes; out params must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_gen_frameheader_deser(
+    bytes: *const u8,
+    len: FwSizeType,
+    mode: i32,
+    start_word: *mut u32,
+    length_field: *mut u32,
+) -> i32 {
+    let mut reader = DeserReader::new(view(bytes, len as usize));
+    match gen_proto::SvcFprimeProtocolFrameHeader::deserialize_from(&mut reader, endianness(mode)) {
+        Ok(value) => {
+            *start_word = value.startWord;
+            *length_field = value.lengthField;
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Serialize a generated `Svc.FprimeProtocol.FrameTrailer`.
+///
+/// # Safety
+/// `out` must point to `capacity` writable bytes; `written` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_gen_frametrailer_ser(
+    crc_field: u32,
+    mode: i32,
+    out: *mut u8,
+    capacity: FwSizeType,
+    written: *mut FwSizeType,
+) -> i32 {
+    let value = gen_proto::SvcFprimeProtocolFrameTrailer {
+        crcField: crc_field,
+    };
+    let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+    let result = value.serialize_to(&mut buf, endianness(mode));
+    *written = buf.len() as FwSizeType;
+    status_code(&result)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-construct generated-type proof surface (Phase 4)
+// ---------------------------------------------------------------------------
+// Drives the types generated from Rust/test/ut/RustGenTypes.fpp, the model
+// written to exercise every construct the generator supports. Two operations
+// cover both directions with a tiny surface:
+//
+//   default  -- serialize a default-constructed value (catches dropped FPP
+//               `default` clauses, which are invisible to a round-trip test)
+//   roundtrip -- deserialize C++-produced bytes and re-serialize them; byte
+//               equality proves field order, widths, and endianness agree
+//
+// Type ids match FPRIME_RS_GEN_* in Rust/RustGenerated.h.
+
+use fprime_svc::generated::com_cfg as gen_test;
+
+macro_rules! gen_test_dispatch {
+    ($id:expr, $ty:ident, $body:expr) => {
+        match $id {
+            0 => {
+                type $ty = gen_test::ComCfgApid;
+                $body
+            }
+            1 => {
+                type $ty = gen_test::ComCfgPvn;
+                $body
+            }
+            2 => {
+                type $ty = gen_test::ComCfgFrameContext;
+                $body
+            }
+            3 => {
+                type $ty = gen_test::TimeBase;
+                $body
+            }
+            _ => fprime_core::SerError::FormatError.code(),
+        }
+    };
+}
+
+/// Serialize a default-constructed value of the selected generated type.
+///
+/// # Safety
+/// `out` must point to `capacity` writable bytes; `written` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_gen_test_default(
+    type_id: i32,
+    mode: i32,
+    out: *mut u8,
+    capacity: FwSizeType,
+    written: *mut FwSizeType,
+) -> i32 {
+    gen_test_dispatch!(type_id, T, {
+        let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+        let result = T::default().serialize_to(&mut buf, endianness(mode));
+        *written = buf.len() as FwSizeType;
+        status_code(&result)
+    })
+}
+
+/// Deserialize `bytes` into the selected generated type and re-serialize it.
+/// Byte equality with the input proves the Rust view of the wire format
+/// matches whatever produced those bytes.
+///
+/// # Safety
+/// `bytes` must point to `len` readable bytes; `out` to `capacity` writable
+/// bytes; `written` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_gen_test_roundtrip(
+    type_id: i32,
+    bytes: *const u8,
+    len: FwSizeType,
+    mode: i32,
+    out: *mut u8,
+    capacity: FwSizeType,
+    written: *mut FwSizeType,
+) -> i32 {
+    gen_test_dispatch!(type_id, T, {
+        let mut reader = DeserReader::new(view(bytes, len as usize));
+        match T::deserialize_from(&mut reader, endianness(mode)) {
+            Ok(value) => {
+                let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+                let result = value.serialize_to(&mut buf, endianness(mode));
+                *written = buf.len() as FwSizeType;
+                status_code(&result)
+            }
+            Err(e) => e.code(),
+        }
+    })
+}
+
+/// The generated `SERIALIZED_SIZE` of the selected type, for comparison with
+/// the autocoded C++ constant.
+#[no_mangle]
+pub extern "C" fn fprime_rs_gen_test_serialized_size(type_id: i32) -> FwSizeType {
+    (match type_id {
+        0 => gen_test::ComCfgApid::SERIALIZED_SIZE,
+        1 => gen_test::ComCfgPvn::SERIALIZED_SIZE,
+        2 => gen_test::ComCfgFrameContext::SERIALIZED_SIZE,
+        3 => gen_test::TimeBase::SERIALIZED_SIZE,
+        _ => 0,
+    }) as FwSizeType
+}

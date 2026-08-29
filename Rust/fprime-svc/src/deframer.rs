@@ -9,7 +9,9 @@
 //! why the raw descriptor is returned rather than a validated APID.
 
 use fprime_config::FwPacketDescriptorType;
+use fprime_core::{DeserReader, Endianness};
 
+use crate::generated::fprime_protocol::SvcFprimeProtocolFrameHeader as FrameHeader;
 use crate::protocol::{frame_crc, HEADER_SIZE, START_WORD, TRAILER_SIZE};
 
 /// Mirrors the dataIn_handler decision, in C++ evaluation order.
@@ -58,10 +60,18 @@ pub fn deframe(data: &[u8]) -> Deframed {
     if data.len() < HEADER_SIZE + TRAILER_SIZE {
         return drop(Outcome::BufferTooShort);
     }
-    if be_u32(&data[0..4]) != START_WORD {
+    // Phase 4 retrofit: the header is parsed by the fpp-to-rust generated
+    // type rather than by hand. The size gate above guarantees the read
+    // succeeds; the C++ original likewise FW_ASSERTs its header deserialize.
+    let mut reader = DeserReader::new(data);
+    let header = match FrameHeader::deserialize_from(&mut reader, Endianness::Big) {
+        Ok(header) => header,
+        Err(_) => unreachable!("header fits: size gate checked above"),
+    };
+    if header.startWord != START_WORD {
         return drop(Outcome::BadStartWord);
     }
-    let length_field = be_u32(&data[4..8]) as u64;
+    let length_field = header.lengthField as u64;
     // Mirrors: expected = SERIALIZED_SIZE(header) + lengthField + SERIALIZED_SIZE(trailer)
     let expected = (HEADER_SIZE as u64) + length_field + (TRAILER_SIZE as u64);
     if data.len() as u64 != expected {

@@ -28,8 +28,26 @@ mixed C++/Rust deployments working at every step.
       (raw-pointer per-byte copy, matching the C++ loop) after in-tree
       detector tests exposed self-serialization; all suites green and Ref GDS
       integration 11/11 with the Rust orchestration live in the uplink
-- [ ] **Phase 4 — Codegen**: `fpp-to-rust` fed by `fpp-to-json` + a `rust.cmake`
-      autocoder; retrofit ported components, prove generated glue identical
+- [x] **Phase 4 — Codegen (types)**: `tools/fprime-rs/fpp_to_rust.py` generates
+      Rust structs/enums/arrays from FPP models via `fpp-to-json` (the FPP
+      compiler is never modified), folding `default` clauses through FPP's own
+      `valueMap` and emitting `SERIALIZED_SIZE` to match the autocode;
+      `cmake/autocoder/rust.cmake` implements the autocoder plugin contract to
+      verify the checked-in generated code against its model at build time
+      (`-DFPRIME_RUST_AUTOCODE=ON`, exercised in CI). **Scope, stated plainly:**
+      this generates *types*, not component handlers or FFI glue — a new
+      component still needs hand-written shims (component generation is Phase 7
+      work). Differential coverage is `Svc/FprimeProtocol` (flat U32 structs)
+      and `default/config/ComCfg` (enums with explicit reprs and `default`
+      clauses, a nine-member struct with defaults, nested enums, bools, several
+      integer widths), each compared default-constructed, round-tripped, and on
+      `SERIALIZED_SIZE`, in both endianness modes. **Not yet covered by a
+      differential test:** arrays, floats, 64-bit members, and member arrays —
+      the generator handles them and they have generator-level tests, but no
+      byte-for-byte comparison against autocode. String members are refused
+      with a clear error. The retrofit onto generated types is the deframer's
+      header parse and the protocol size constants; the trailer read and the
+      framer's writes are still hand-rolled.
 - [ ] **Phase 5 — Active components and drivers**: `Svc/ComQueue`, then
       I2C/UART/GPIO drivers after characterization tests (known defect fixes
       land as reviewed, test-pinned divergences)

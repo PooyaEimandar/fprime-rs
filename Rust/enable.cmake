@@ -28,6 +28,14 @@ option(FPRIME_RUST_IMPL_SVC_FPRIME_FRAMER "Use the Rust FprimeFramer logic" ON)
 option(FPRIME_RUST_IMPL_SVC_FRAME_ACCUMULATOR "Use the Rust FrameAccumulator orchestration" ON)
 option(FPRIME_RUST_IMPL_SVC_FPRIME_ROUTER "Use the Rust FprimeRouter context table" ON)
 
+# Phase 4: verify the checked-in generated Rust still matches its FPP model as
+# part of the build. Opt-in because the generator needs fpp-to-json on PATH
+# (the fprime venv provides it). Must be registered before module detection.
+option(FPRIME_RUST_AUTOCODE "Verify generated Rust against FPP models during the build" OFF)
+if (FPRIME_RUST_AUTOCODE)
+    register_fprime_build_autocoder("autocoder/rust" FALSE)
+endif()
+
 set(FPRIME_RS_AVAILABLE FALSE)
 if (FPRIME_ENABLE_RUST)
     find_program(FPRIME_CARGO cargo)

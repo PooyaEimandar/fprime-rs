@@ -16,6 +16,7 @@ on:
       - "Svc/FprimeRouter/**"
       - "CMakeLists.txt"
       - "cmake/**"
+      - "tools/fprime-rs/**"
       - "default/config/FpConfig.fpp"
       - "default/config/FpConstants.fpp"
       - "default/config/ComCfg.fpp"
@@ -36,6 +37,7 @@ on:
       - "Svc/FprimeRouter/**"
       - "CMakeLists.txt"
       - "cmake/**"
+      - "tools/fprime-rs/**"
       - "default/config/FpConfig.fpp"
       - "default/config/FpConstants.fpp"
       - "default/config/ComCfg.fpp"
@@ -83,7 +85,6 @@ jobs:
             --out-cpp /tmp/generated-check.cpp
           diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
           diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp
-
   framework-check:
     # Builds the C++ framework with the Rust implementations selected and runs
     # the affected unit-test suites (the equivalence oracles): the codec
@@ -109,10 +110,31 @@ jobs:
           python3 -m venv fprime-venv
           . fprime-venv/bin/activate
           pip install -q -r requirements.txt
-      - name: Generate UT build cache
+      - name: Generated code is up to date
         run: |
           . fprime-venv/bin/activate
-          fprime-util generate --ut
+          python3 tools/fprime-rs/gen_config.py \
+            --platform cmake/platform/unix/Platform/PlatformTypes.fpp \
+            --config default/config/FpConfig.fpp default/config/ComCfg.fpp \
+            --constants default/config/FpConstants.fpp \
+            --out /tmp/generated-config.rs --out-cpp /tmp/generated-check.cpp
+          diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
+          diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp
+          python3 tools/fprime-rs/fpp_to_rust.py \
+            --module-name "Svc/FprimeProtocol/FprimeProtocol.fpp" \
+            --out /tmp/fprime_protocol.rs Svc/FprimeProtocol/FprimeProtocol.fpp
+          diff -u Rust/fprime-svc/src/generated/fprime_protocol.rs /tmp/fprime_protocol.rs
+          python3 tools/fprime-rs/fpp_to_rust.py \
+            --module-name "Rust/test/ut/RustGenTypes.fpp" \
+            --out /tmp/rust_gen_types.rs Rust/test/ut/RustGenTypes.fpp
+          diff -u Rust/fprime-svc/src/generated/rust_gen_types.rs /tmp/rust_gen_types.rs
+      - name: Generate UT build cache
+        # FPRIME_RUST_AUTOCODE=ON exercises cmake/autocoder/rust.cmake, which
+        # re-verifies the checked-in generated Rust against its model at build
+        # time; without this the autocoder would be untested and would rot.
+        run: |
+          . fprime-venv/bin/activate
+          fprime-util generate --ut -DFPRIME_RUST_AUTOCODE=ON
       - name: Check Rust-backed modules
         run: |
           . fprime-venv/bin/activate

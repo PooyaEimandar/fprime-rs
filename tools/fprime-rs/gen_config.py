@@ -45,7 +45,9 @@ FPP_TO_RUST = {
 }
 
 TYPE_RE = re.compile(r"^\s*(?:dictionary\s+)?type\s+(\w+)\s*=\s*(\w+)\s*(?:@.*)?$")
-CONST_RE = re.compile(r"^\s*(?:dictionary\s+)?constant\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+|-?\d+)\s*(?:@.*)?$")
+CONST_RE = re.compile(
+    r"^\s*(?:dictionary\s+)?constant\s+(\w+)\s*=\s*(0x[0-9A-Fa-f]+|-?\d+)\s*(?:@.*)?$"
+)
 
 
 def parse_aliases(path: Path) -> dict:
@@ -81,8 +83,13 @@ def resolve(name: str, aliases: dict, seen=None) -> str:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--platform", required=True, type=Path)
-    ap.add_argument("--config", required=True, type=Path, nargs="+",
-                    help="FPP config files; the first must be FpConfig.fpp (its aliases are C++-checked)")
+    ap.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        nargs="+",
+        help="FPP config files; the first must be FpConfig.fpp (its aliases are C++-checked)",
+    )
     ap.add_argument("--constants", required=True, type=Path)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--out-cpp", required=True, type=Path)
@@ -135,19 +142,21 @@ def main() -> None:
     ]
     for name in fw_names:
         cpp.append(
-            f'static_assert(sizeof({name}) == {widths[name]}, '
+            f"static_assert(sizeof({name}) == {widths[name]}, "
             f'"{name} width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");'
         )
     cpp.append("")
     for cname in ("FW_SERIALIZE_TRUE_VALUE", "FW_SERIALIZE_FALSE_VALUE"):
         if cname in consts:
             cpp.append(
-                f'static_assert(static_cast<unsigned int>({cname}) == {consts[cname]}u, '
+                f"static_assert(static_cast<unsigned int>({cname}) == {consts[cname]}u, "
                 f'"{cname} changed: regenerate Rust/fprime-config");'
             )
     cpp.append("")
     args.out_cpp.write_text("\n".join(cpp))
-    print(f"wrote {args.out} ({len(fw_names)} aliases) and {args.out_cpp} ({len(fw_names)} checked)")
+    print(
+        f"wrote {args.out} ({len(fw_names)} aliases) and {args.out_cpp} ({len(fw_names)} checked)"
+    )
 
 
 if __name__ == "__main__":

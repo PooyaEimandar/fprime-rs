@@ -12,6 +12,7 @@ register_fprime_module(
         "${CMAKE_CURRENT_LIST_DIR}/RustCodec.h"
         "${CMAKE_CURRENT_LIST_DIR}/RustUtils.h"
         "${CMAKE_CURRENT_LIST_DIR}/RustSvc.h"
+        "${CMAKE_CURRENT_LIST_DIR}/RustGenerated.h"
     DEPENDS
         Fw_Types
 )
@@ -23,17 +24,35 @@ if (NOT FPRIME_IS_SUB_BUILD)
     # Declaring the back-edge makes CMake repeat the archives on the link line
     # (macOS ld tolerates single-pass ordering; GNU ld does not).
     set_target_properties(fprime_rust PROPERTIES INTERFACE_LINK_LIBRARIES Rust_Codec)
+endif()
 
-    if (BUILD_TESTING AND FPRIME_ENABLE_FRAMEWORK_UTS)
-        register_fprime_ut(
-                Rust_Codec_differential_ut
-            SOURCES
-                "${CMAKE_CURRENT_LIST_DIR}/test/ut/RustCodecDifferentialTest.cpp"
-            DEPENDS
-                Rust_Codec
-                Fw_Types
-        )
+# Unit tests are registered in sub-builds too: the info-cache sub-build must
+# see the FPP inputs below to compute their dependency cache, which the main
+# build's fpp autocoder then reads. Only the artifacts that need the imported
+# cargo target stay behind the sub-build guard.
+if (BUILD_TESTING AND FPRIME_ENABLE_FRAMEWORK_UTS)
+    register_fprime_ut(
+            Rust_Codec_differential_ut
+        SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/test/ut/RustCodecDifferentialTest.cpp"
+        DEPENDS
+            Rust_Codec
+            Fw_Types
+    )
 
+    # Phase 4: prove the fpp-to-rust GENERATED types serialize byte-for-byte
+    # like the C++ types fpp autocodes from the same model
+    register_fprime_ut(
+            Rust_generated_types_ut
+        SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/test/ut/RustGeneratedTypesTest.cpp"
+        DEPENDS
+            Rust_Codec
+            Fw_Types
+            Svc_FprimeProtocol
+    )
+
+    if (NOT FPRIME_IS_SUB_BUILD)
         # Rust-side unit tests run under the same ctest umbrella as the C++
         # UTs, so `fprime-util check` covers both languages. fprime-ffi is
         # excluded: its staticlib crate-type cannot build under the test

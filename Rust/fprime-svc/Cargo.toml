@@ -7,4 +7,5 @@ description = "Rust implementations of F Prime service-component logic (FprimeDe
 
 [dependencies]
 fprime-config = { path = "../fprime-config" }
+fprime-core = { path = "../fprime-core" }
 fprime-utils = { path = "../fprime-utils" }
