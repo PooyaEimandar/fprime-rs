@@ -85,8 +85,30 @@ mixed C++/Rust deployments working at every step.
       Safety-Critical Rust Consortium's coding guidelines have nothing to
       adopt yet: their `unsafety`, `ffi`, and `concurrency` chapters are
       empty
-- [ ] **Phase 7 — Rust-native component runtime**: full components generated in
-      Rust (dispatch, queues, cmd/tlm/event plumbing); no per-component C++
+- [~] **Phase 7 — partial: generated component glue.** `fpp_to_rust.py
+      --component` now generates, from a component's FPP model, the three
+      layers that Phases 2/3/5 hand-wrote per component: a Rust handler trait,
+      the `extern "C"` dispatch stubs, and the C++ shim that forwards each
+      port handler across. `Svc/RustDemo` demonstrates it end to end — a real
+      framework component driven through its real ports into Rust, with no
+      hand-written glue. Dispatch carries the component **instance** (an
+      opaque pointer installed by `setRustHandlers` before ports connect), not
+      a per-type global, so multiple instances do not share state and no
+      `static mut` is read unsynchronized.
+
+      **What this is not.** The phase's stated goal — "a component runs with
+      no per-component C++ at all" — is **not** met: the generated shim and a
+      hand-written component header are still per-component C++, and the
+      autocoded C++ base still owns ports, threading and all framework
+      plumbing. Nothing of the dispatch loop, queue consumption, or
+      command/telemetry/event/parameter handling moved to Rust. The generator
+      accepts only input ports whose parameters are primitives or bools passed
+      by value with no return type, and refuses everything else by name —
+      which means essentially no existing framework component qualifies today
+      (they carry `Fw::Buffer`, user types and `ref` parameters), and the
+      demonstration component was written to fit those limits. The
+      hand-written shims from Phases 2, 3 and 5 were **not** retrofitted onto
+      the generator
 - [ ] **Phase 8 — `Fw` core in Rust**: serialization/types/buffers become the
       canonical Rust crates; C++ consumes them via reverse shims (the flip point)
 - [ ] **Phase 9 — OSAL in Rust + component long tail**: port what deployments

@@ -10,6 +10,9 @@ add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Interfaces/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Ping/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/PolyIf/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Sched/")
+
+# fprime-rs Phase 7 demonstration: a component whose glue is fully generated
+add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/RustDemo/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Seq/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/WatchDog/")
 add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Ports/")

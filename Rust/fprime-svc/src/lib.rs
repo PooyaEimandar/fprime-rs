@@ -11,6 +11,7 @@
 pub mod generated {
     pub mod com_cfg;
     pub mod fprime_protocol;
+    pub mod rust_demo_glue;
 }
 
 pub mod accumulator;
@@ -18,6 +19,7 @@ pub mod comqueue;
 pub mod deframer;
 pub mod framer;
 pub mod router_table;
+pub mod rust_demo;
 
 /// F Prime protocol constants, mirroring `Svc/FprimeProtocol/FprimeProtocol.fpp`
 /// (`FrameHeader { startWord: U32 = 0xdeadbeef, lengthField: U32 }`,

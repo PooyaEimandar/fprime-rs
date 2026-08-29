@@ -1017,3 +1017,31 @@ pub unsafe extern "C" fn fprime_rs_comqueue_select(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// RustDemo component registration (Phase 7)
+// ---------------------------------------------------------------------------
+// The dispatch stubs are generated from the model; which Rust instance backs a
+// given component object is a deployment decision, so it lives here. Declared
+// for C++ in Rust/RustDemoRegistration.h (hand-written, kept separate from the
+// generated glue header so regeneration cannot clobber it).
+
+use fprime_svc::generated::rust_demo_glue::{handler_ptr, RustDemoHandlers};
+use fprime_svc::rust_demo::RustDemo;
+
+static RUST_DEMO: RustDemo = RustDemo::new();
+// A `'static` reference to the trait object, so `handler_ptr` has something
+// thin to point at. No allocator involved.
+static RUST_DEMO_HANDLERS: &dyn RustDemoHandlers = &RUST_DEMO;
+
+/// The opaque handler pointer for this deployment's RustDemo instance.
+#[no_mangle]
+pub extern "C" fn fprime_rs_rustdemo_instance() -> *const core::ffi::c_void {
+    handler_ptr(&RUST_DEMO_HANDLERS)
+}
+
+/// The instance's running total, for tests and telemetry.
+#[no_mangle]
+pub extern "C" fn fprime_rs_rustdemo_total() -> u32 {
+    RUST_DEMO.total()
+}

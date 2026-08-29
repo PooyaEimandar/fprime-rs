@@ -723,6 +723,22 @@ def main():
     ap.add_argument(
         "--module-name", required=True, help="label recorded in the generated header"
     )
+    ap.add_argument(
+        "--component",
+        help="generate glue for this component instead of type definitions",
+    )
+    ap.add_argument("--out-header", type=Path, help="component mode: C header path")
+    ap.add_argument("--out-shim", type=Path, help="component mode: C++ shim path")
+    ap.add_argument(
+        "--shim-include",
+        default="",
+        help="component mode: include path the shim uses for the component header",
+    )
+    ap.add_argument(
+        "--glue-include",
+        default="",
+        help="component mode: include path the shim uses for the generated C header",
+    )
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument(
         "--modules",
@@ -737,6 +753,9 @@ def main():
     try:
         with tempfile.TemporaryDirectory() as tmp:
             ast, analysis = run_fpp_to_json(args.sources, Path(tmp))
+        if args.component:
+            emit_component(ast, analysis, args)
+            return
         model = build_model(ast, analysis, args.modules)
         code = generate(model, args.module_name)
     except GeneratorError as exc:
@@ -760,6 +779,410 @@ def main():
         f"fpp-to-rust: {args.out} "
         f"({len(model.structs)} structs, {len(model.enums)} enums, {len(model.arrays)} arrays)"
     )
+
+
+
+
+# ---------------------------------------------------------------------------
+# Component glue generation (Phase 7)
+# ---------------------------------------------------------------------------
+#
+# Phases 2, 3 and 5 each hand-wrote the glue that connects an autocoded C++
+# component to its Rust logic: a trait, a set of `extern "C"` stubs, and a
+# shim class forwarding handlers across. The shapes stabilized, so they are
+# generated here from the same FPP model that produces the C++ base.
+#
+# Scope, deliberately narrow: input ports whose parameters are all primitives
+# or bools passed by value, with no return type. Ports carrying Fw::Buffer,
+# user-defined types, `ref` parameters, or return values are refused by name
+# -- the marshalling for those is what the hand-written shims still do, and
+# guessing at it would produce plausible-but-wrong glue.
+
+
+PORT_KIND_SYNC = "SyncInput"
+PORT_KIND_GUARDED = "GuardedInput"
+PORT_KIND_ASYNC = "AsyncInput"
+INPUT_KINDS = (PORT_KIND_SYNC, PORT_KIND_GUARDED, PORT_KIND_ASYNC)
+
+
+class Port:
+    """One input port reduced to what the glue needs."""
+
+    def __init__(self, name, kind, params):
+        self.name = name
+        self.kind = kind
+        self.params = params  # [(param name, ("prim", rust, size) | ("bool",...))]
+
+
+def collect_ports(ast, analysis, component_name, where):
+    """Find `component_name` in the analysis and describe its input ports."""
+    components = analysis.get("componentMap", {})
+    port_defs = {}
+    for node in iter_port_definitions(ast):
+        port_defs[node[0]] = node[1]
+
+    chosen = None
+    for entry in components.values():
+        node_id = entry["aNode"]["astNodeId"]
+        name = component_ast_name(ast, node_id)
+        if name == component_name:
+            chosen = entry
+            break
+    if chosen is None:
+        raise GeneratorError(f"{where}: no component named '{component_name}' in the model")
+
+    ports = []
+    for port_name, spec in chosen["portInterface"]["portMap"].items():
+        general = spec.get("General")
+        if general is None:
+            continue  # special ports (command/event/telemetry) are not glued here
+        kind = general["kind"]
+        if kind not in INPUT_KINDS:
+            continue  # output ports are called from the shim, not dispatched to
+        port_symbol = general["ty"].get("DefPort", {}).get("symbol", {}).get("Port")
+        if port_symbol is None:
+            raise GeneratorError(f"{where}.{port_name}: unsupported port type")
+        definition = port_defs.get(port_symbol["nodeId"])
+        if definition is None:
+            raise GeneratorError(f"{where}.{port_name}: port definition not found")
+        ports.append(Port(port_name, kind, port_params(definition, analysis, f"{where}.{port_name}")))
+    ports.sort(key=lambda port: port.name)
+    return ports
+
+
+def iter_port_definitions(ast):
+    """Yield (ast node id, DefPort data) for every port definition."""
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "DefPort" in node:
+                data, node_id = unwrap(node["DefPort"]["node"])
+                found.append((node_id, data))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(ast)
+    return found
+
+
+def component_ast_name(ast, node_id):
+    """Recover a component's declared name from its AST node id."""
+    result = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "DefComponent" in node:
+                data, this_id = unwrap(node["DefComponent"]["node"])
+                if this_id == node_id:
+                    result.append(data["name"])
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(ast)
+    return result[0] if result else None
+
+
+def port_params(definition, analysis, where):
+    """Describe a port's formal parameters, refusing shapes the glue cannot carry."""
+    if opt(definition.get("returnType")) is not None:
+        raise GeneratorError(
+            f"{where}: ports with return types are not generated yet "
+            "(the value must cross back over the FFI)"
+        )
+    type_map = analysis["typeMap"]
+    params = []
+    for entry in definition["params"]:
+        data, _ = unwrap(entry[1])
+        kind = next(iter(data["kind"])) if isinstance(data["kind"], dict) else data["kind"]
+        if kind != "Value":
+            raise GeneratorError(
+                f"{where}.{data['name']}: `ref` parameters are not generated yet"
+            )
+        _, type_id = unwrap(data["typeName"])
+        desc = resolve_type(type_map, type_id)
+        if desc[0] not in ("prim", "bool"):
+            raise GeneratorError(
+                f"{where}.{data['name']}: only primitive and bool parameters are "
+                f"generated yet, got {desc[0]}"
+            )
+        params.append((data["name"], desc))
+    return params
+
+
+def c_type(desc):
+    """The C spelling of a parameter type."""
+    if desc[0] == "bool":
+        return "bool"
+    return {
+        "u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t", "u64": "uint64_t",
+        "i8": "int8_t", "i16": "int16_t", "i32": "int32_t", "i64": "int64_t",
+        "f32": "float", "f64": "double",
+    }[desc[1]]
+
+
+def rust_param_type(desc):
+    return "bool" if desc[0] == "bool" else desc[1]
+
+
+def snake(name):
+    """FPP port names are camelCase; trait methods read better in snake_case."""
+    out = []
+    for index, char in enumerate(name):
+        if char.isupper() and index > 0:
+            out.append("_")
+        out.append(char.lower())
+    return "".join(out)
+
+
+def generate_component_rust(module_path, component, ports, model_label):
+    """The Rust side: a handler trait plus the extern "C" dispatch stubs.
+
+    The dispatch carries the component INSTANCE, not a global: F Prime
+    topologies routinely instantiate a component type more than once, and a
+    per-type global would silently share one Rust object (and its state)
+    across every instance. It also avoids a `static mut` that every port call
+    would read unsynchronized, which is a data race whatever the calling
+    convention.
+
+    The instance travels as a thin `*const c_void` pointing at a
+    `&'static dyn Trait` -- a pointer to the fat pointer -- because a trait
+    object cannot be squeezed into one pointer width.
+    """
+    prefix = f"fprime_rs_{component.lower()}"
+    trait = f"{component}Handlers"
+    out = [
+        f"//! Rust glue for the FPP component `{'.'.join(list(module_path) + [component])}`.",
+        "//!",
+        "//! GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
+        f"//! Model: `{model_label}`",
+        "//!",
+        "//! Implement [`" + trait + "`] on a `'static` value, hand its",
+        "//! [`handler_ptr`] to the component's `setRustHandlers` before the",
+        "//! topology connects, and every port call arrives at that instance.",
+        "#![allow(dead_code)]",
+        "#![allow(non_snake_case)]",
+        "",
+        "use core::ffi::c_void;",
+        "",
+        "/// Handlers for each input port of the component.",
+        "///",
+        "/// Methods take `&self`: sync input ports run on the caller's thread, so",
+        "/// two ports of one instance can be entered concurrently. Mutable state",
+        "/// belongs behind interior mutability.",
+        f"pub trait {trait}: Sync {{",
+    ]
+    for port in ports:
+        args = "".join(f", {name}: {rust_param_type(desc)}" for name, desc in port.params)
+        out.append(f"    /// `{port.name}` ({port.kind})")
+        out.append(f"    fn {snake(port.name)}(&self, port_num: i32{args});")
+    out.append("}")
+    out.append("")
+    out.append("/// The opaque instance pointer to hand to `setRustHandlers`.")
+    out.append("///")
+    out.append("/// Takes a reference to a `'static` trait object reference, so the")
+    out.append("/// resulting thin pointer stays valid for the life of the program and")
+    out.append("/// nothing needs an allocator.")
+    out.append(f"pub fn handler_ptr(handlers: &'static &'static dyn {trait}) -> *const c_void {{")
+    out.append("    handlers as *const _ as *const c_void")
+    out.append("}")
+    out.append("")
+    out.append(f"/// Recover the instance a stub was handed.")
+    out.append("///")
+    out.append("/// # Safety")
+    out.append("/// `handlers` must be a pointer produced by [`handler_ptr`].")
+    out.append(
+        f"unsafe fn handlers_from(handlers: *const c_void) -> Option<&'static dyn {trait}> {{"
+    )
+    out.append("    if handlers.is_null() {")
+    out.append("        return None;")
+    out.append("    }")
+    out.append("    // SAFETY: the caller guarantees this came from `handler_ptr`, which")
+    out.append("    // produces a pointer to a `'static` trait-object reference.")
+    out.append(
+        f"    Some(*unsafe {{ &*(handlers as *const &'static dyn {trait}) }})"
+    )
+    out.append("}")
+    out.append("")
+    for port in ports:
+        c_args = "".join(f", {name}: {rust_param_type(desc)}" for name, desc in port.params)
+        call_args = "".join(f", {name}" for name, _ in port.params)
+        out.append(f"/// Dispatch stub for `{port.name}`, called by the generated C++ shim.")
+        out.append("///")
+        out.append("/// # Safety")
+        out.append("/// `handlers` must be a pointer produced by [`handler_ptr`], or null.")
+        out.append("#[no_mangle]")
+        out.append(
+            f'pub unsafe extern "C" fn {prefix}_{port.name}('
+            f"handlers: *const c_void, port_num: i32{c_args}) {{"
+        )
+        out.append("    // SAFETY: forwarded unchanged from the shim, which stores only")
+        out.append("    // pointers produced by `handler_ptr`.")
+        out.append("    if let Some(handlers) = unsafe { handlers_from(handlers) } {")
+        out.append(f"        handlers.{snake(port.name)}(port_num{call_args});")
+        out.append("    }")
+        out.append("}")
+        out.append("")
+    return "\n".join(out)
+
+
+def generate_component_header(module_path, component, ports, model_label):
+    """The C declarations the shim calls."""
+    guard = f"FPRIME_RS_{component.upper()}_GLUE_H"
+    prefix = f"fprime_rs_{component.lower()}"
+    out = [
+        f"// GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
+        f"// Model: {model_label}",
+        f"// Component: {'.'.join(list(module_path) + [component])}",
+        f"#ifndef {guard}",
+        f"#define {guard}",
+        "",
+        "#include <stdbool.h>",
+        "#include <stdint.h>",
+        "",
+        "// Each stub carries the component INSTANCE as an opaque pointer, obtained",
+        "// from the Rust side's handler_ptr() and installed with the component's",
+        "// setRustHandlers(). A null pointer makes the call a no-op, so a component",
+        "// that was never given handlers fails quietly rather than dereferencing.",
+        "",
+        "#ifdef __cplusplus",
+        'extern "C" {',
+        "#endif",
+        "",
+    ]
+    for port in ports:
+        args = "".join(f", {c_type(desc)} {name}" for name, desc in port.params)
+        out.append(f"//! Dispatch `{port.name}` ({port.kind}) into the Rust handler")
+        out.append(f"void {prefix}_{port.name}(const void* handlers, int32_t portNum{args});")
+        out.append("")
+    out += ["#ifdef __cplusplus", "}", "#endif", "", f"#endif  // {guard}", ""]
+    return "\n".join(out)
+
+
+def generate_component_shim(module_path, component, ports, model_label, include_path, glue_include):
+    """The C++ shim: the component class, forwarding each handler into Rust."""
+    namespace = module_path[0] if module_path else "Components"
+    out = [
+        "// ======================================================================",
+        f"// GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
+        f"// Model: {model_label}",
+        "//",
+        f"// Shim for {'.'.join(list(module_path) + [component])}: the autocoded base",
+        "// keeps ownership of ports, threading and the framework plumbing; each",
+        "// input port handler forwards into the Rust implementation.",
+        "// ======================================================================",
+        "",
+        f'#include "{include_path}"',
+        f'#include "{glue_include}"',
+        "",
+        f"namespace {namespace} {{",
+        "",
+        f"{component} ::{component}(const char* const compName)",
+        f"    : {component}ComponentBase(compName), m_rustHandlers(nullptr) {{}}",
+        "",
+        f"{component} ::~{component}() {{}}",
+        "",
+        "//! Install the Rust instance that answers this component's ports. Call",
+        "//! once during initialization, before the topology connects ports: the",
+        "//! pointer is read by every handler and is not synchronized.",
+        f"void {component} ::setRustHandlers(const void* handlers) {{",
+        "    this->m_rustHandlers = handlers;",
+        "}",
+        "",
+    ]
+    for port in ports:
+        args = "".join(f", {c_type(desc)} {name}" for name, desc in port.params)
+        call = "".join(f", {name}" for name, _ in port.params)
+        out.append(
+            f"void {component} ::{port.name}_handler(FwIndexType portNum{args}) {{"
+        )
+        out.append(
+            f"    {'fprime_rs_' + component.lower()}_{port.name}("
+            f"this->m_rustHandlers, static_cast<int32_t>(portNum){call});"
+        )
+        out.append("}")
+        out.append("")
+    out.append(f"}}  // namespace {namespace}")
+    out.append("")
+    return "\n".join(out)
+
+
+def emit_component(ast, analysis, args):
+    """Component mode: write the Rust glue, the C header, and the C++ shim."""
+    if args.out_header is None or args.out_shim is None:
+        raise GeneratorError("component mode requires --out-header and --out-shim")
+
+    module_path = ()
+    for entry in analysis.get("componentMap", {}).values():
+        name = component_ast_name(ast, entry["aNode"]["astNodeId"])
+        if name == args.component:
+            module_path = component_module_path(ast, args.component)
+            break
+
+    ports = collect_ports(ast, analysis, args.component, args.component)
+    if not ports:
+        raise GeneratorError(
+            f"{args.component}: no input ports the generator can carry "
+            "(see the scope note in this file)"
+        )
+
+    writes = [
+        (args.out, generate_component_rust(module_path, args.component, ports, args.module_name)),
+        (
+            args.out_header,
+            generate_component_header(module_path, args.component, ports, args.module_name),
+        ),
+        (
+            args.out_shim,
+            generate_component_shim(
+                module_path,
+                args.component,
+                ports,
+                args.module_name,
+                args.shim_include,
+                args.glue_include,
+            ),
+        ),
+    ]
+    for path, text in writes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    if shutil.which("rustfmt") is not None:
+        subprocess.run(["rustfmt", "--edition", "2021", str(args.out)], check=True)
+    print(
+        f"fpp-to-rust: {args.component} glue -> {args.out}, {args.out_header}, "
+        f"{args.out_shim} ({len(ports)} input ports)"
+    )
+
+
+def component_module_path(ast, component_name):
+    """The module path enclosing a component definition."""
+    found = []
+
+    def walk(members, path):
+        for entry in members:
+            node = entry[1]
+            if not isinstance(node, dict):
+                continue
+            for kind, wrapper in node.items():
+                if kind == "DefModule":
+                    data, _ = unwrap(wrapper["node"])
+                    walk(data["members"], path + [data["name"]])
+                elif kind == "DefComponent":
+                    data, _ = unwrap(wrapper["node"])
+                    if data["name"] == component_name:
+                        found.append(tuple(path))
+
+    for unit in ast:
+        walk(unit["members"], [])
+    return found[0] if found else ()
 
 
 if __name__ == "__main__":
