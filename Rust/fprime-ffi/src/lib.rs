@@ -910,3 +910,89 @@ pub extern "C" fn fprime_rs_gen_test_serialized_size(type_id: i32) -> FwSizeType
         _ => 0,
     }) as FwSizeType
 }
+
+// ---------------------------------------------------------------------------
+// Svc/ComQueue priority scheduling (Phase 5)
+// ---------------------------------------------------------------------------
+
+use fprime_svc::comqueue;
+
+/// Mirrors `fprime_svc::comqueue::Decision`; layout must match
+/// FprimeRsComQueueDecision in Rust/RustSvc.h.
+#[repr(C)]
+pub struct ComQueueDecisionFfi {
+    /// Queue index to dequeue and send, or -1 when every queue is empty
+    pub selected: i16,
+    /// Position of the selected entry in the prioritized list
+    pub position: FwSizeType,
+    /// Exclusive end of the same-priority run to rotate
+    pub rotate_end: FwSizeType,
+}
+
+/// Choose the next queue to drain, mirroring `ComQueue::processQueue`'s
+/// selection loop. The shim performs the dequeue/send and the rotation of its
+/// own QueueMetadata entries.
+///
+/// # Safety
+/// `indices` and `priorities` must each point to `count` readable values;
+/// `sizes` to `size_count` readable values; `out` must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_comqueue_select(
+    indices: *const i16,
+    priorities: *const i16,
+    count: FwSizeType,
+    sizes: *const FwSizeType,
+    size_count: FwSizeType,
+    out: *mut ComQueueDecisionFfi,
+) {
+    let count = count as usize;
+    let index_slice = if count == 0 {
+        &[][..]
+    } else {
+        core::slice::from_raw_parts(indices, count)
+    };
+    let priority_slice = if count == 0 {
+        &[][..]
+    } else {
+        core::slice::from_raw_parts(priorities, count)
+    };
+    let size_slice = if size_count == 0 {
+        &[][..]
+    } else {
+        core::slice::from_raw_parts(sizes, size_count as usize)
+    };
+
+    // The entry list is bounded by the component's port count; build it on the
+    // stack so this allocates nothing. FPRIME_RS_COMQUEUE_MAX_ENTRIES in
+    // Rust/RustSvc.h mirrors this, and ComQueueRust.cpp static_asserts that
+    // its TOTAL_PORT_COUNT fits -- so truncation cannot happen silently.
+    const MAX_ENTRIES: usize = 64;
+    let usable = count.min(MAX_ENTRIES);
+    let mut entries = [comqueue::Entry {
+        index: 0,
+        priority: 0,
+    }; MAX_ENTRIES];
+    for i in 0..usable {
+        entries[i] = comqueue::Entry {
+            index: index_slice[i],
+            priority: priority_slice[i],
+        };
+    }
+
+    match comqueue::select(&entries[..usable], size_slice) {
+        Some(decision) => {
+            *out = ComQueueDecisionFfi {
+                selected: decision.selected,
+                position: decision.position as FwSizeType,
+                rotate_end: decision.rotate_end as FwSizeType,
+            }
+        }
+        None => {
+            *out = ComQueueDecisionFfi {
+                selected: -1,
+                position: 0,
+                rotate_end: 0,
+            }
+        }
+    }
+}

@@ -1,0 +1,530 @@
+// ======================================================================
+// \title  ComQueue.cpp
+// \author vbai
+// \brief  cpp file for ComQueue component implementation class
+// ======================================================================
+
+// ======================================================================
+// ComQueueRust.cpp
+//
+// Rust-backed implementation of the ComQueue component (fprime-rs Phase 5).
+// ComQueue is an ACTIVE component: the autocoded base owns the thread and the
+// Os::Queue that feeds it, and continues to do so here. What moved to Rust is
+// the priority scheduling in processQueue -- which queue to drain next, and
+// how far to round-robin its same-priority peers
+// (Rust/fprime-svc/src/comqueue.rs). Everything touching C++ types stays in
+// this file: dequeueing, sending, buffer ownership, throttling, and the
+// rotation of QueueMetadata entries.
+//
+// Selected instead of ComQueue.cpp via FPRIME_RUST_IMPL_SVC_COM_QUEUE;
+// behavior is identical, enforced by the existing unit-test suite.
+// ======================================================================
+
+#include <Fw/Com/ComPacket.hpp>
+#include <Fw/Types/Assert.hpp>
+#include <Svc/ComQueue/ComQueue.hpp>
+#include <type_traits>
+#include "Fw/Types/BasicTypes.hpp"
+#include "Rust/RustSvc.h"
+
+// The Rust selector builds its entry list in a fixed-size stack array; a
+// project that scales ComQueue's port counts past it must not silently lose
+// queues, so fail the build instead (see FPRIME_RS_COMQUEUE_MAX_ENTRIES).
+static_assert(Svc::ComQueue::TOTAL_PORT_COUNT <= FPRIME_RS_COMQUEUE_MAX_ENTRIES,
+              "ComQueue::TOTAL_PORT_COUNT exceeds the fprime-rs scheduler's entry capacity");
+
+namespace Svc {
+
+// ----------------------------------------------------------------------
+// Construction, initialization, and destruction
+// ----------------------------------------------------------------------
+
+using FwUnsignedIndexType = std::make_unsigned<FwIndexType>::type;
+
+ComQueue ::QueueConfigurationTable ::QueueConfigurationTable() {
+    static_assert(static_cast<FwUnsignedIndexType>(std::numeric_limits<FwIndexType>::max()) >=
+                      FW_NUM_ARRAY_ELEMENTS(this->entries),
+                  "Number of entries must fit into FwIndexType");
+    for (FwIndexType i = 0; i < static_cast<FwIndexType>(FW_NUM_ARRAY_ELEMENTS(this->entries)); i++) {
+        this->entries[i].priority = 0;
+        this->entries[i].depth = 0;
+        this->entries[i].mode = Types::QUEUE_FIFO;
+        this->entries[i].overflowMode = Types::QUEUE_DROP_NEWEST;
+    }
+}
+
+ComQueue ::ComQueue(const char* const compName)
+    : ComQueueComponentBase(compName),
+      m_state(WAITING),
+      m_buffer_state(OWNED),
+      m_allocationId(static_cast<FwEnumStoreType>(-1)),
+      m_allocator(nullptr),
+      m_allocation(nullptr) {
+    // Initialize throttles to "off"
+    for (FwIndexType i = 0; i < TOTAL_PORT_COUNT; i++) {
+        this->m_throttle[i] = false;
+    }
+
+    static_assert(TOTAL_PORT_COUNT >= 1, "ComQueue must have more than one port");
+}
+
+ComQueue ::~ComQueue() {}
+
+void ComQueue ::cleanup() {
+    // Deallocate memory ignoring error conditions
+    if ((this->m_allocator != nullptr) && (this->m_allocation != nullptr)) {
+        this->m_allocator->deallocate(this->m_allocationId, this->m_allocation);
+    }
+}
+
+void ComQueue::configure(const QueueConfigurationTable& queueConfig,
+                         FwEnumStoreType allocationId,
+                         Fw::MemAllocator& allocator) {
+    FwIndexType currentPriorityIndex = 0;
+    FwSizeType totalAllocation = 0;
+
+    // Store/initialize allocator members
+    this->m_allocator = &allocator;
+    this->m_allocationId = allocationId;
+    this->m_allocation = nullptr;
+
+    // Initializes the sorted queue metadata list in priority (sorted) order. This is accomplished by walking the
+    // priority values in priority order from 0 to TOTAL_PORT_COUNT. At each priory value, the supplied queue
+    // configuration table is walked and any entry matching the current priority values is used to add queue metadata to
+    // the prioritized list. This results in priority-sorted queue metadata objects that index back into the unsorted
+    // queue data structures.
+    //
+    // The total allocation size is tracked for passing to the allocation call and is a summation of
+    // (depth * message size)  for each prioritized metadata object of (depth * message size)
+    for (FwIndexType currentPriority = 0; currentPriority < TOTAL_PORT_COUNT; currentPriority++) {
+        // Walk each queue configuration entry and add them into the prioritized metadata list when matching the current
+        // priority value
+        for (FwIndexType entryIndex = 0;
+             entryIndex < static_cast<FwIndexType>(FW_NUM_ARRAY_ELEMENTS(queueConfig.entries)); entryIndex++) {
+            // Check for valid configuration entry
+            FW_ASSERT(queueConfig.entries[entryIndex].priority < TOTAL_PORT_COUNT,
+                      static_cast<FwAssertArgType>(queueConfig.entries[entryIndex].priority),
+                      static_cast<FwAssertArgType>(TOTAL_PORT_COUNT), static_cast<FwAssertArgType>(entryIndex));
+            // A zero depth is the default-constructed value and divides by zero in the overflow check below
+            FW_ASSERT(queueConfig.entries[entryIndex].depth > 0, static_cast<FwAssertArgType>(entryIndex));
+
+            if (currentPriority == queueConfig.entries[entryIndex].priority) {
+                // Set up the queue metadata object in order to track priority, depth, index into the queue list of the
+                // backing queue object, and message size. Both index and message size are calculated where priority and
+                // depth are copied from the configuration object.
+                QueueMetadata& entry = this->m_prioritizedList[currentPriorityIndex];
+                entry.priority = queueConfig.entries[entryIndex].priority;
+                entry.depth = queueConfig.entries[entryIndex].depth;
+                entry.mode = queueConfig.entries[entryIndex].mode;
+                entry.overflowMode = queueConfig.entries[entryIndex].overflowMode;
+                entry.index = entryIndex;
+                // Message size is determined by the type of object being stored, which in turn is determined by the
+                // index of the entry. Those lower than COM_PORT_COUNT are Fw::ComBuffers and those larger Fw::Buffer.
+                entry.msgSize = (entryIndex < COM_PORT_COUNT) ? static_cast<FwSizeType>(Fw::ComBuffer::SERIALIZED_SIZE)
+                                                              : static_cast<FwSizeType>(Fw::Buffer::SERIALIZED_SIZE);
+                // Overflow checks
+                FW_ASSERT((std::numeric_limits<FwSizeType>::max() / entry.depth) >= entry.msgSize,
+                          static_cast<FwAssertArgType>(entry.depth), static_cast<FwAssertArgType>(entry.msgSize));
+                FW_ASSERT(std::numeric_limits<FwSizeType>::max() - (entry.depth * entry.msgSize) >= totalAllocation);
+                totalAllocation += entry.depth * entry.msgSize;
+                currentPriorityIndex++;
+            }
+        }
+    }
+    // Allocate a single chunk of memory from the memory allocator. Memory recover is neither needed nor used.
+    bool recoverable = false;
+    FwSizeType actualAllocation = totalAllocation;
+    this->m_allocation = this->m_allocator->allocate(this->m_allocationId, actualAllocation, recoverable);
+    FW_ASSERT(this->m_allocation != nullptr);
+    FW_ASSERT(actualAllocation >= totalAllocation, static_cast<FwAssertArgType>(actualAllocation),
+              static_cast<FwAssertArgType>(totalAllocation));
+
+    // Each of the backing queue objects must be supplied memory to store the queued messages. These data regions are
+    // sub-portions of the total allocated data. This memory is passed out by looping through each queue in prioritized
+    // order and passing out the memory to each queue's setup method.
+    FwSizeType allocationOffset = 0;
+    for (FwIndexType i = 0; i < TOTAL_PORT_COUNT; i++) {
+        // Get current queue's allocation size and safety check the values
+        FwSizeType allocationSize = this->m_prioritizedList[i].depth * this->m_prioritizedList[i].msgSize;
+        FW_ASSERT(this->m_prioritizedList[i].index < static_cast<FwIndexType>(FW_NUM_ARRAY_ELEMENTS(this->m_queues)),
+                  static_cast<FwAssertArgType>(this->m_prioritizedList[i].index));
+        FW_ASSERT((allocationSize + allocationOffset) <= totalAllocation, static_cast<FwAssertArgType>(allocationSize),
+                  static_cast<FwAssertArgType>(allocationOffset), static_cast<FwAssertArgType>(totalAllocation));
+
+        // Setup queue's memory allocation, depth, and message size. Setup is skipped for a depth 0 queue
+        if (allocationSize > 0) {
+            this->m_queues[this->m_prioritizedList[i].index].setup(
+                reinterpret_cast<U8*>(this->m_allocation) + allocationOffset, allocationSize,
+                this->m_prioritizedList[i].depth, this->m_prioritizedList[i].msgSize, this->m_prioritizedList[i].mode,
+                this->m_prioritizedList[i].overflowMode);
+        }
+        allocationOffset += allocationSize;
+    }
+    // Safety check that all memory was used as expected
+    FW_ASSERT(allocationOffset == totalAllocation, static_cast<FwAssertArgType>(allocationOffset),
+              static_cast<FwAssertArgType>(totalAllocation));
+}
+
+// ----------------------------------------------------------------------
+// Handler implementations for commands
+// ----------------------------------------------------------------------
+
+void ComQueue ::FLUSH_QUEUE_cmdHandler(FwOpcodeType opCode,
+                                       U32 cmdSeq,
+                                       const Svc::QueueType& queueType,
+                                       FwIndexType index) {
+    // Acquire the queue that we need to drain
+    FwIndexType queueIndex = this->getQueueNum(queueType, index);
+
+    // Validate queue index
+    if (queueIndex < 0 || queueIndex >= TOTAL_PORT_COUNT) {
+        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
+        return;
+    }
+    FW_ASSERT(queueIndex >= 0 && queueIndex < TOTAL_PORT_COUNT, static_cast<FwAssertArgType>(queueIndex));
+
+    this->drainQueue(queueIndex);
+    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+void ComQueue ::FLUSH_ALL_QUEUES_cmdHandler(FwOpcodeType opCode, U32 cmdSeq) {
+    for (FwIndexType i = 0; i < TOTAL_PORT_COUNT; i++) {
+        this->drainQueue(i);
+    }
+    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+void ComQueue::SET_QUEUE_PRIORITY_cmdHandler(FwOpcodeType opCode,
+                                             U32 cmdSeq,
+                                             const Svc::QueueType& queueType,
+                                             FwIndexType index,
+                                             FwIndexType newPriority) {
+    // Acquire the queue we are to reprioritize
+    FwIndexType queueIndex = this->getQueueNum(queueType, index);
+
+    // Validate queue index
+    if (queueIndex < 0 || queueIndex >= TOTAL_PORT_COUNT) {
+        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
+        return;
+    }
+
+    // Validate priority range
+    if (newPriority < 0 || newPriority >= TOTAL_PORT_COUNT) {
+        this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::VALIDATION_ERROR);
+        return;
+    }
+
+    // Find our queue in the prioritized list & update the priority
+    for (FwIndexType prioIndex = 0; prioIndex < TOTAL_PORT_COUNT; prioIndex++) {
+        // Each entry must reference a valid queue index
+        FW_ASSERT(m_prioritizedList[prioIndex].index >= 0 && m_prioritizedList[prioIndex].index < TOTAL_PORT_COUNT,
+                  static_cast<FwAssertArgType>(m_prioritizedList[prioIndex].index));
+        // If the port based index matches, then update
+        if (m_prioritizedList[prioIndex].index == queueIndex) {
+            m_prioritizedList[prioIndex].priority = newPriority;
+            break;  // Since we shouldn't find more than one queue at this port index
+        }
+    }
+
+    // Re-sort the prioritized list to maintain priority ordering
+    // Using simple bubble sort since TOTAL_PORT_COUNT is typically small
+    for (FwIndexType i = 0; i < TOTAL_PORT_COUNT - 1; i++) {
+        for (FwIndexType j = 0; (j < TOTAL_PORT_COUNT - i - 1) && (j < TOTAL_PORT_COUNT - 1); j++) {
+            if (m_prioritizedList[j].priority > m_prioritizedList[j + 1].priority) {
+                // Swap metadata
+                QueueMetadata temp = m_prioritizedList[j];
+                m_prioritizedList[j] = m_prioritizedList[j + 1];
+                m_prioritizedList[j + 1] = temp;
+            }
+        }
+    }
+
+    // Emit event for successful priority change
+    this->log_ACTIVITY_HI_QueuePriorityChanged(queueType, index, newPriority);
+
+    // Send command response
+    this->cmdResponse_out(opCode, cmdSeq, Fw::CmdResponse::OK);
+}
+
+// ----------------------------------------------------------------------
+// Handler implementations for user-defined typed input ports
+// ----------------------------------------------------------------------
+
+void ComQueue::comPacketQueueIn_handler(const FwIndexType portNum, Fw::ComBuffer& data, U32 context) {
+    // Ensure that the port number of comPacketQueueIn is consistent with the expectation
+    FW_ASSERT(portNum >= 0 && portNum < COM_PORT_COUNT, static_cast<FwAssertArgType>(portNum));
+    (void)this->enqueue(portNum, data);
+}
+
+void ComQueue::bufferQueueIn_handler(const FwIndexType portNum, Fw::Buffer& fwBuffer) {
+    FW_ASSERT(std::numeric_limits<FwIndexType>::max() - COM_PORT_COUNT > portNum);
+    const FwIndexType queueNum = static_cast<FwIndexType>(portNum + COM_PORT_COUNT);
+    // Ensure that the port number of bufferQueueIn is consistent with the expectation
+    FW_ASSERT(portNum >= 0 && portNum < BUFFER_PORT_COUNT, static_cast<FwAssertArgType>(portNum));
+    FW_ASSERT(queueNum < TOTAL_PORT_COUNT);
+    bool success = this->enqueue(queueNum, fwBuffer);
+    if (!success) {
+        this->bufferReturnOut_out(portNum, fwBuffer);
+    }
+}
+
+void ComQueue::comStatusIn_handler(const FwIndexType portNum, Fw::Success& condition) {
+    switch (this->m_state) {
+        // On success, the queue should be processed. On failure, the component should still wait.
+        case WAITING:
+            if (condition.e == Fw::Success::SUCCESS) {
+                this->m_state = READY;
+                this->processQueue();
+                // A message may or may not be sent. Thus, READY or WAITING are acceptable final states.
+                FW_ASSERT((this->m_state == WAITING || this->m_state == READY),
+                          static_cast<FwAssertArgType>(this->m_state));
+            } else {
+                this->m_state = WAITING;
+            }
+            break;
+        // Both READY and unknown states should not be possible at this point. To receive a status message we must be
+        // one of the WAITING or RETRY states.
+        default:
+            FW_ASSERT(false, static_cast<FwAssertArgType>(this->m_state));
+            break;
+    }
+}
+
+void ComQueue::run_handler(const FwIndexType portNum, U32 context) {
+    // Downlink the high-water marks for the Fw::ComBuffer array types
+    ComQueueDepth comQueueDepth;
+    FW_ASSERT(comQueueDepth.SIZE <= COM_PORT_COUNT, static_cast<FwAssertArgType>(comQueueDepth.SIZE));
+    for (U32 i = 0; i < comQueueDepth.SIZE; i++) {
+        comQueueDepth[i] = static_cast<U32>(this->m_queues[i].get_high_water_mark());
+        this->m_queues[i].clear_high_water_mark();
+    }
+    this->tlmWrite_comQueueDepth(comQueueDepth);
+
+    // Downlink the high-water marks for the Fw::Buffer array types
+    BuffQueueDepth buffQueueDepth;
+    FW_ASSERT((buffQueueDepth.SIZE + COM_PORT_COUNT) <= TOTAL_PORT_COUNT,
+              static_cast<FwAssertArgType>(buffQueueDepth.SIZE));
+    for (U32 i = 0; i < buffQueueDepth.SIZE; i++) {
+        buffQueueDepth[i] = static_cast<U32>(this->m_queues[i + COM_PORT_COUNT].get_high_water_mark());
+        this->m_queues[i + COM_PORT_COUNT].clear_high_water_mark();
+    }
+    this->tlmWrite_buffQueueDepth(buffQueueDepth);
+}
+
+void ComQueue ::dataReturnIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) {
+    static_assert(std::numeric_limits<FwIndexType>::is_signed, "FwIndexType must be signed");
+    // This handler runs on the returning caller's thread: take ownership atomically
+    const BufferState previousState = this->m_buffer_state.exchange(OWNED);
+    FW_ASSERT(previousState == UNOWNED, static_cast<FwAssertArgType>(previousState));
+    // For the buffer queues, the index of the queue is portNum offset by COM_PORT_COUNT since
+    // the first COM_PORT_COUNT queues are for ComBuffer. So we have for buffer queues:
+    // queueNum = portNum + COM_PORT_COUNT
+    // Since queueNum is used as APID, we can retrieve the original portNum like such:
+    FwIndexType bufferReturnPortNum = static_cast<FwIndexType>(context.get_comQueueIndex() - ComQueue::COM_PORT_COUNT);
+    // Failing this assert means that context.apid was modified since ComQueue set it, which should not happen
+    FW_ASSERT(bufferReturnPortNum < BUFFER_PORT_COUNT, static_cast<FwAssertArgType>(bufferReturnPortNum));
+    if (bufferReturnPortNum >= 0) {
+        // It is a coding error not to connect the associated bufferReturnOut port for each dataReturnIn port
+        FW_ASSERT(this->isConnected_bufferReturnOut_OutputPort(bufferReturnPortNum),
+                  static_cast<FwAssertArgType>(bufferReturnPortNum));
+        // If this is a buffer port, return the buffer to the BufferDownlink
+        this->bufferReturnOut_out(bufferReturnPortNum, data);
+    }
+}
+
+// ----------------------------------------------------------------------
+// Hook implementations for typed async input ports
+// ----------------------------------------------------------------------
+
+void ComQueue::bufferQueueIn_overflowHook(FwIndexType portNum, Fw::Buffer& fwBuffer) {
+    FW_ASSERT(portNum >= 0 && portNum < BUFFER_PORT_COUNT, static_cast<FwAssertArgType>(portNum));
+    this->bufferReturnOut_out(portNum, fwBuffer);
+}
+
+// ----------------------------------------------------------------------
+// Private helper methods
+// ----------------------------------------------------------------------
+
+bool ComQueue::enqueue(const FwIndexType queueNum, const Fw::ComBuffer& data) {
+    // Enqueue the given message onto the matching queue. When no space is available then emit the queue overflow event,
+    // set the appropriate throttle, and move on. Will assert if passed a message for a depth 0 queue.
+    FW_ASSERT(queueNum >= 0 && queueNum < COM_PORT_COUNT, static_cast<FwAssertArgType>(queueNum));
+
+    const Fw::SerializeStatus status = this->m_queues[queueNum].enqueue(data);
+    return this->handleEnqueueStatus(queueNum, QueueType::COM_QUEUE, queueNum, false, status);
+}
+
+bool ComQueue::enqueue(const FwIndexType queueNum, const Fw::Buffer& data) {
+    // Enqueue the given message onto the matching queue. When no space is available then emit the queue overflow event,
+    // set the appropriate throttle, and move on. Will assert if passed a message for a depth 0 queue.
+    FW_ASSERT(queueNum >= COM_PORT_COUNT && queueNum < TOTAL_PORT_COUNT, static_cast<FwAssertArgType>(queueNum));
+    const FwIndexType portNum = static_cast<FwIndexType>(queueNum - COM_PORT_COUNT);
+
+    // For buffer queues with DROP_OLDEST, check if the queue is full before enqueuing.
+    // If full, dequeue the oldest entry first so we can return buffer ownership before
+    // Queue::enqueue() silently discards it via rotate.  This prevents buffer-pool leaks.
+    bool preEmptiveOverflow = false;
+    Types::Queue& queue = this->m_queues[queueNum];
+    for (FwIndexType i = 0; i < TOTAL_PORT_COUNT; i++) {
+        if (this->m_prioritizedList[i].index == queueNum &&
+            this->m_prioritizedList[i].overflowMode == Types::QUEUE_DROP_OLDEST &&
+            queue.getQueueSize() >= this->m_prioritizedList[i].depth) {
+            // Queue is full and will drop oldest; remove the front entry to return ownership.
+            // popFront() always removes from the front (oldest) regardless of queue mode,
+            // matching the rotate-based removal that Queue::enqueue() uses for DROP_OLDEST.
+            Fw::Buffer droppedBuffer;
+            Fw::SerializeStatus dequeueStatus = queue.popFront(droppedBuffer);
+            FW_ASSERT(dequeueStatus == Fw::FW_SERIALIZE_OK, static_cast<FwAssertArgType>(dequeueStatus));
+            this->bufferReturnOut_out(portNum, droppedBuffer);
+            preEmptiveOverflow = true;
+            break;
+        }
+    }
+
+    const Fw::SerializeStatus status = this->m_queues[queueNum].enqueue(data);
+    return this->handleEnqueueStatus(queueNum, QueueType::BUFFER_QUEUE, portNum, preEmptiveOverflow, status);
+}
+
+bool ComQueue::handleEnqueueStatus(const FwIndexType queueNum,
+                                   QueueType queueType,
+                                   const FwIndexType portNum,
+                                   const bool preEmptiveOverflow,
+                                   const Fw::SerializeStatus status) {
+    if (preEmptiveOverflow || status == Fw::FW_SERIALIZE_NO_ROOM_LEFT ||
+        status == Fw::FW_SERIALIZE_DISCARDED_EXISTING) {
+        if (!this->m_throttle[queueNum]) {
+            this->log_WARNING_HI_QueueOverflow(queueType, portNum);
+            this->m_throttle[queueNum] = true;
+        }
+    }
+
+    // When the component is already in READY state process the queue to send out the next available message immediately
+    if (this->m_state == READY) {
+        this->processQueue();
+    }
+
+    // Check if the buffer was accepted or must be returned
+    return status != Fw::FW_SERIALIZE_NO_ROOM_LEFT;
+}
+
+void ComQueue::sendComBuffer(Fw::ComBuffer& comBuffer, FwIndexType queueIndex) {
+    FW_ASSERT(this->m_state == READY);
+    Fw::Buffer outBuffer(comBuffer.getBuffAddr(), static_cast<Fw::Buffer::SizeType>(comBuffer.getSize()));
+
+    // Context value is used to determine what to do when the buffer returns on the dataReturnIn port
+    ComCfg::FrameContext context;
+    FwPacketDescriptorType descriptor = 0;
+    Fw::SerializeStatus status = comBuffer.deserializeTo(descriptor);
+    FW_ASSERT(status == Fw::FW_SERIALIZE_OK, static_cast<FwAssertArgType>(status));
+    context.set_apid(static_cast<ComCfg::Apid::T>(descriptor));
+    context.set_comQueueIndex(queueIndex);
+    const BufferState previousState = this->m_buffer_state.exchange(UNOWNED);
+    FW_ASSERT(previousState == OWNED, static_cast<FwAssertArgType>(previousState));
+    this->dataOut_out(0, outBuffer, context);
+    // Set state to WAITING for the status to come back
+    this->m_state = WAITING;
+}
+
+void ComQueue::sendBuffer(Fw::Buffer& buffer, FwIndexType queueIndex) {
+    // Retry buffer expected to be cleared as we are either transferring ownership or have already deallocated it.
+    FW_ASSERT(this->m_state == READY);
+
+    // Context value is used to determine what to do when the buffer returns on the dataReturnIn port
+    ComCfg::FrameContext context;
+    FwPacketDescriptorType descriptor;
+    Fw::SerializeStatus status = buffer.getDeserializer().deserializeTo(descriptor);
+    FW_ASSERT(status == Fw::FW_SERIALIZE_OK, static_cast<FwAssertArgType>(status));
+    context.set_apid(static_cast<ComCfg::Apid::T>(descriptor));
+    context.set_comQueueIndex(queueIndex);
+    const BufferState previousState = this->m_buffer_state.exchange(UNOWNED);
+    FW_ASSERT(previousState == OWNED, static_cast<FwAssertArgType>(previousState));
+    this->dataOut_out(0, buffer, context);
+    // Set state to WAITING for the status to come back
+    this->m_state = WAITING;
+}
+
+void ComQueue::drainQueue(FwIndexType index) {
+    FW_ASSERT(index >= 0 && index < TOTAL_PORT_COUNT, static_cast<FwAssertArgType>(index));
+    Types::Queue& queue = this->m_queues[index];
+
+    // Read all messages from the queue and discard them
+    Fw::SerializeStatus status = Fw::FW_SERIALIZE_OK;
+    const FwSizeType available = queue.getQueueSize();
+    for (FwSizeType i = 0; (i < available) && (status == Fw::FW_SERIALIZE_OK); i++) {
+        if (index < COM_PORT_COUNT) {
+            // Dequeueing deserializes the persisted Fw::ComBuffer from the queue's storage
+            Fw::ComBuffer comBuffer;
+            status = queue.dequeue(comBuffer);
+        } else {
+            // For buffer queues, if the buffer requires ownership return, return it via the bufferReturnOut port
+            // Dequeueing deserializes the persisted Fw::Buffer from the queue's storage
+            Fw::Buffer buffer;
+            status = queue.dequeue(buffer);
+            this->bufferReturnOut_out(static_cast<FwIndexType>(index - COM_PORT_COUNT), buffer);
+        }
+    }
+}
+
+void ComQueue::processQueue() {
+    // Check that we are in the appropriate state
+    FW_ASSERT(this->m_state == READY);
+
+    // Gather the scheduling inputs. The Rust selector reads only the queue
+    // index and priority of each prioritized entry, plus each queue's depth.
+    I16 indices[TOTAL_PORT_COUNT];
+    I16 priorities[TOTAL_PORT_COUNT];
+    FwSizeType sizes[TOTAL_PORT_COUNT];
+    for (FwIndexType i = 0; i < TOTAL_PORT_COUNT; i++) {
+        indices[i] = static_cast<I16>(this->m_prioritizedList[i].index);
+        priorities[i] = static_cast<I16>(this->m_prioritizedList[i].priority);
+        sizes[i] = this->m_queues[i].getQueueSize();
+    }
+
+    FprimeRsComQueueDecision decision;
+    fprime_rs_comqueue_select(indices, priorities, TOTAL_PORT_COUNT, sizes, TOTAL_PORT_COUNT, &decision);
+
+    // Every queue empty: nothing to send and nothing to rotate
+    if (decision.selected < 0) {
+        return;
+    }
+    const FwIndexType selected = static_cast<FwIndexType>(decision.selected);
+    FW_ASSERT(selected >= 0 && selected < TOTAL_PORT_COUNT, static_cast<FwAssertArgType>(selected));
+    FW_ASSERT(decision.position < static_cast<FwSizeType>(TOTAL_PORT_COUNT),
+              static_cast<FwAssertArgType>(decision.position));
+    FW_ASSERT(decision.rotateEnd <= static_cast<FwSizeType>(TOTAL_PORT_COUNT),
+              static_cast<FwAssertArgType>(decision.rotateEnd));
+    Types::Queue& queue = this->m_queues[selected];
+
+    // Send out the message based on the type
+    if (selected < COM_PORT_COUNT) {
+        // Dequeue deserializes the persisted Fw::ComBuffer from the queue's storage
+        FW_ASSERT(this->m_buffer_state.load() == OWNED);
+        auto dequeue_status = queue.dequeue(this->m_dequeued_com_buffer);
+        FW_ASSERT(dequeue_status == Fw::SerializeStatus::FW_SERIALIZE_OK,
+                  static_cast<FwAssertArgType>(dequeue_status));
+        this->sendComBuffer(this->m_dequeued_com_buffer, selected);
+    } else {
+        Fw::Buffer buffer;
+        auto dequeue_status = queue.dequeue(buffer);
+        FW_ASSERT(dequeue_status == Fw::SerializeStatus::FW_SERIALIZE_OK,
+                  static_cast<FwAssertArgType>(dequeue_status));
+        this->sendBuffer(buffer, selected);
+    }
+
+    // Update the throttle for the index that was just sent
+    this->m_throttle[selected] = false;
+
+    // Rotate the run of same-priority entries the selector identified, so the
+    // dispatched queue ends up last among its peers and the rest shift up.
+    for (FwSizeType position = decision.position + 1; position < decision.rotateEnd; position++) {
+        QueueMetadata temp = this->m_prioritizedList[position];
+        this->m_prioritizedList[position] = this->m_prioritizedList[position - 1];
+        this->m_prioritizedList[position - 1] = temp;
+    }
+}
+
+FwIndexType ComQueue::getQueueNum(Svc::QueueType queueType, FwIndexType portNum) {
+    // Acquire the queue that we need to drain
+    return static_cast<FwIndexType>(portNum + ((queueType == QueueType::COM_QUEUE) ? 0 : COM_PORT_COUNT));
+}
+}  // end namespace Svc

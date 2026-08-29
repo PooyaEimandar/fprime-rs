@@ -14,6 +14,7 @@ pub mod generated {
 }
 
 pub mod accumulator;
+pub mod comqueue;
 pub mod deframer;
 pub mod framer;
 pub mod router_table;

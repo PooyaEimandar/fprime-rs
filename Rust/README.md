@@ -48,9 +48,24 @@ mixed C++/Rust deployments working at every step.
       with a clear error. The retrofit onto generated types is the deframer's
       header parse and the protocol size constants; the trailer read and the
       framer's writes are still hand-rolled.
-- [ ] **Phase 5 — Active components and drivers**: `Svc/ComQueue`, then
-      I2C/UART/GPIO drivers after characterization tests (known defect fixes
-      land as reviewed, test-pinned divergences)
+- [~] **Phase 5 — partial**: what moved to Rust is ComQueue's *priority-selection
+      predicate* — roughly 19 lines deciding which queue to drain next and how
+      far its same-priority run extends (`fprime-svc/src/comqueue.rs`). **This is
+      not an active-component port:** the thread, the `Os::Queue`, enqueue, the
+      three commands, overflow hooks, buffer ownership and the rotation itself
+      all remain C++ in a shim that is slightly *longer* than the file it
+      replaces. Equivalence to the original algorithm was brute-forced over
+      ~12M (list, priority, emptiness) combinations, and `Rust_comqueue_scheduler_ut`
+      covers the round-robin rotation across the FFI — which ComQueue's own
+      suite never exercises. **Drivers not started.** `LinuxGpioDriver` and
+      `LinuxI2cDriver` drive char devices through `ioctl` and need new test
+      infrastructure before any port; `LinuxUartDriver` needs no production
+      change — a pty-based characterization test is feasible today and is the
+      real prerequisite. None of the three has usable test coverage now
+      (I2C's `test/ut` is unregistered, does not compile against the current
+      `Fw::Buffer` API, and would require real hardware), and their known
+      defects (UART partial-write data loss, GPIO poll-error spin) are
+      therefore still unfixed
 - [ ] **Phase 6 — Qualification hardening**: Ferrocene toolchain option,
       Safety-Critical Rust coding guidelines
 - [ ] **Phase 7 — Rust-native component runtime**: full components generated in

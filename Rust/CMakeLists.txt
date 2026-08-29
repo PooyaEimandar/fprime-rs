@@ -52,6 +52,18 @@ if (BUILD_TESTING AND FPRIME_ENABLE_FRAMEWORK_UTS)
             Svc_FprimeProtocol
     )
 
+    # Phase 5: the ComQueue scheduler across the shipped FFI, covering the
+    # round-robin rotation that ComQueue's own suite never observes.
+    register_fprime_ut(
+            Rust_comqueue_scheduler_ut
+        SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/test/ut/RustComQueueSchedulerTest.cpp"
+        DEPENDS
+            Rust_Codec
+            Fw_Types
+            Svc_ComQueue
+    )
+
     if (NOT FPRIME_IS_SUB_BUILD)
         # Rust-side unit tests run under the same ctest umbrella as the C++
         # UTs, so `fprime-util check` covers both languages. fprime-ffi is

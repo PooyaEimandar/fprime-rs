@@ -27,6 +27,7 @@ option(FPRIME_RUST_IMPL_SVC_FPRIME_DEFRAMER "Use the Rust FprimeDeframer logic" 
 option(FPRIME_RUST_IMPL_SVC_FPRIME_FRAMER "Use the Rust FprimeFramer logic" ON)
 option(FPRIME_RUST_IMPL_SVC_FRAME_ACCUMULATOR "Use the Rust FrameAccumulator orchestration" ON)
 option(FPRIME_RUST_IMPL_SVC_FPRIME_ROUTER "Use the Rust FprimeRouter context table" ON)
+option(FPRIME_RUST_IMPL_SVC_COM_QUEUE "Use the Rust ComQueue priority scheduling" ON)
 
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH

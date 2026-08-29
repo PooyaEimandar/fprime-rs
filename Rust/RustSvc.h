@@ -119,6 +119,28 @@ int64_t fprime_rs_router_table_take(uint8_t* state0,
                                     int32_t inactive,
                                     const uint8_t* key);
 
+// ---------------------------------------------------------------------------
+// Svc/ComQueue priority scheduling (Phase 5)
+// ---------------------------------------------------------------------------
+
+//! Entry capacity of fprime_rs_comqueue_select's fixed stack array. Callers
+//! must not pass a larger count; ComQueueRust.cpp static_asserts against it.
+#define FPRIME_RS_COMQUEUE_MAX_ENTRIES 64
+
+//! Mirrors ComQueueDecisionFfi in Rust/fprime-ffi
+typedef struct {
+    int16_t selected;       //!< Queue index to drain, or -1 when all are empty
+    FwSizeType position;    //!< Position of the selected entry in the list
+    FwSizeType rotateEnd;   //!< Exclusive end of the same-priority run to rotate
+} FprimeRsComQueueDecision;
+
+void fprime_rs_comqueue_select(const int16_t* indices,
+                               const int16_t* priorities,
+                               FwSizeType count,
+                               const FwSizeType* sizes,
+                               FwSizeType sizeCount,
+                               FprimeRsComQueueDecision* out);
+
 #ifdef __cplusplus
 }
 #endif
