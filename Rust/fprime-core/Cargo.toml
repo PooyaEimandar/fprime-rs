@@ -7,3 +7,6 @@ description = "F Prime serialization codec, byte-compatible with Fw::LinearBuffe
 
 [dependencies]
 fprime-config = { path = "../fprime-config" }
+
+[lints]
+workspace = true

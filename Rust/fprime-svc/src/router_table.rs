@@ -27,11 +27,20 @@ pub struct TableView {
 }
 
 impl TableView {
+    /// # Safety
+    /// `index` must be less than `count`; see the type-level contract.
     unsafe fn state_ptr(&self, index: usize) -> *mut i32 {
-        self.state0.add(index * self.stride) as *mut i32
+        // SAFETY: entry `index` lies within the caller-guaranteed array of
+        // `count` entries spaced `stride` bytes apart, and `state0` points at
+        // entry 0's state field, so this lands on entry `index`'s state.
+        unsafe { self.state0.add(index * self.stride) as *mut i32 }
     }
+
+    /// # Safety
+    /// `index` must be less than `count`; see the type-level contract.
     unsafe fn key_ptr(&self, index: usize) -> *mut usize {
-        self.key0.add(index * self.stride) as *mut usize
+        // SAFETY: same reasoning as `state_ptr`, for the key field.
+        unsafe { self.key0.add(index * self.stride) as *mut usize }
     }
 
     /// Mirrors `insertContext` slot selection: claim the first inactive slot
@@ -43,10 +52,15 @@ impl TableView {
     /// See the type-level contract.
     pub unsafe fn insert(&self, key: usize) -> Option<usize> {
         for i in 0..self.count {
-            if core::ptr::read(self.state_ptr(i)) == self.inactive {
-                core::ptr::write(self.state_ptr(i), self.active);
-                core::ptr::write(self.key_ptr(i), key);
-                return Some(i);
+            // SAFETY: `i < self.count`, so both accessors land inside the
+            // live entry array the caller guaranteed, and the caller also
+            // guarantees no concurrent access for the duration of this call.
+            unsafe {
+                if core::ptr::read(self.state_ptr(i)) == self.inactive {
+                    core::ptr::write(self.state_ptr(i), self.active);
+                    core::ptr::write(self.key_ptr(i), key);
+                    return Some(i);
+                }
             }
         }
         None
@@ -66,11 +80,15 @@ impl TableView {
     /// See the type-level contract.
     pub unsafe fn take(&self, key: usize) -> Option<usize> {
         for i in 0..self.count {
-            if core::ptr::read(self.state_ptr(i)) == self.active
-                && core::ptr::read(self.key_ptr(i)) == key
-            {
-                core::ptr::write(self.state_ptr(i), self.inactive);
-                return Some(i);
+            // SAFETY: `i < self.count`, so both accessors land inside the live
+            // entry array; the caller guarantees exclusive access.
+            unsafe {
+                if core::ptr::read(self.state_ptr(i)) == self.active
+                    && core::ptr::read(self.key_ptr(i)) == key
+                {
+                    core::ptr::write(self.state_ptr(i), self.inactive);
+                    return Some(i);
+                }
             }
         }
         None
@@ -118,10 +136,12 @@ mod tests {
     fn insert_take_roundtrip() {
         let mut entries = fresh(4);
         let table = view(&mut entries);
+        // SAFETY: `entries` is a live array of `count` Entry values
         let slot = unsafe { table.insert(0x1000) }.unwrap();
         entries[slot].payload = 42;
 
         let table = view(&mut entries);
+        // SAFETY: as above
         let found = unsafe { table.take(0x1000) }.unwrap();
         assert_eq!(found, slot);
         assert_eq!(entries[found].payload, 42);
@@ -132,6 +152,7 @@ mod tests {
     fn table_full_and_unknown_key() {
         let mut entries = fresh(2);
         let table = view(&mut entries);
+        // SAFETY: `entries` is a live array of `count` Entry values
         unsafe {
             assert!(table.insert(1).is_some());
             assert!(table.insert(2).is_some());
@@ -147,6 +168,7 @@ mod tests {
     fn same_key_takes_first_active_match() {
         let mut entries = fresh(3);
         let table = view(&mut entries);
+        // SAFETY: `entries` is a live array of `count` Entry values
         unsafe {
             let a = table.insert(5).unwrap();
             let b = table.insert(5).unwrap();

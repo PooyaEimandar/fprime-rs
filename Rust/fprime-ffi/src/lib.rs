@@ -27,6 +27,9 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         Some(loc) => (loc.file().as_ptr(), loc.file().len(), loc.line()),
         None => (core::ptr::null(), 0, 0),
     };
+    // SAFETY: the hook is provided by the C++ side (Rust/RustPanicHook.cpp) and
+    // linked into every build that links this staticlib; `file`/`len` describe
+    // a live &str from the panic location.
     unsafe { fprime_rs_panic_hook(file, len, line) };
     // The hook must not return (it aborts). Halt if it somehow does:
     // unwinding into -fno-exceptions C++ is not an option.
@@ -610,45 +613,63 @@ struct AccumulatorEnvFfi<'a> {
     ops: &'a AccumulatorOpsFfi,
 }
 
+// SAFETY (applies to every method below): `self.ops` was validated by the
+// caller of `fprime_rs_accumulator_process`, which requires a fully populated
+// trampoline table whose function pointers are valid for `ops.ctx` and do not
+// unwind. Each call passes `ops.ctx` unchanged, and no Rust reference into the
+// component's state is held across any of these calls.
 impl accumulator::Env for AccumulatorEnvFfi<'_> {
     fn ring_free(&mut self) -> u64 {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.ring_free)(self.ops.ctx) }
     }
     fn ring_allocated(&mut self) -> u64 {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.ring_allocated)(self.ops.ctx) }
     }
     fn ring_capacity(&mut self) -> u64 {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.ring_capacity)(self.ops.ctx) }
     }
     fn ring_serialize(&mut self, bytes: &[u8]) -> i32 {
+        // SAFETY: see the impl-level note above; `bytes` is a live slice, so
+        // its pointer and length are valid for the duration of the call.
         unsafe {
             (self.ops.ring_serialize)(self.ops.ctx, bytes.as_ptr(), bytes.len() as FwSizeType)
         }
     }
     fn ring_rotate(&mut self, amount: u64) -> i32 {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.ring_rotate)(self.ops.ctx, amount) }
     }
     fn detect(&mut self) -> (i32, u64) {
         let mut size_out: FwSizeType = 0;
+        // SAFETY: see the impl-level note above; `size_out` is a live local.
         let status = unsafe { (self.ops.detect)(self.ops.ctx, &mut size_out) };
         (status, size_out)
     }
     fn allocate_frame(&mut self, size: u64) -> bool {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.allocate_frame)(self.ops.ctx, size) != 0 }
     }
     fn peek_into_frame(&mut self, size: u64) -> i32 {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.peek_into_frame)(self.ops.ctx, size) }
     }
     fn emit_frame(&mut self) {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.emit_frame)(self.ops.ctx) }
     }
     fn log_frame_size_error(&mut self, size: u64) {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.log_frame_size_error)(self.ops.ctx, size) }
     }
     fn log_no_buffer(&mut self) {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.log_no_buffer)(self.ops.ctx) }
     }
     fn log_frame_dropped(&mut self) {
+        // SAFETY: see the impl-level note above.
         unsafe { (self.ops.log_frame_dropped)(self.ops.ctx) }
     }
 }

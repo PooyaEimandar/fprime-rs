@@ -17,3 +17,37 @@ codegen-units = 1
 # Dev builds of the no_std staticlib also must not unwind. 
 [profile.dev]
 panic = "abort"
+
+# ---------------------------------------------------------------------------
+# Safety posture (fprime-rs Phase 6)
+# ---------------------------------------------------------------------------
+# Two lints, both denied, both chosen because they force the C++/Rust contract
+# to be written down where it actually lives -- the unsafe surface -- and
+# because review alone catches these poorly. Crates opt in with
+# `[lints] workspace = true`.
+#
+# Deliberately NOT enabled, with reasons, so the omissions are decisions
+# rather than oversights:
+#   * clippy::arithmetic_side_effects, clippy::indexing_slicing -- fire
+#     pervasively in codec and ring-buffer code whose wrapping and indexing
+#     ARE the specified behavior (they mirror C++ that wraps identically).
+#     Enabling them would mean hundreds of per-site allows, which hides the
+#     few sites that deserve attention.
+#   * clippy::unwrap_used / expect_used -- the only uses are in unit tests,
+#     where a panic is the reporting mechanism.
+#   * missing_docs -- generated modules would need blanket allows, weakening
+#     the signal for hand-written code.
+#   * cast_possible_truncation -- the FFI's width conversions are already
+#     guarded by a const assertion that usize is at least FwSizeType-wide
+#     (Rust/fprime-ffi/src/lib.rs), which is the check that matters.
+[workspace.lints.rust]
+# An unsafe operation inside an `unsafe fn` must still sit in an explicit
+# `unsafe` block, so the reviewed unit is the operation, not the whole
+# function. This is what makes the FFI's raw-pointer work auditable.
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# Every unsafe block carries a SAFETY comment justifying it. For this port the
+# unsafe surface *is* the C++/Rust contract, so an unjustified block is an
+# unreviewed contract.
+undocumented_unsafe_blocks = "deny"

@@ -47,7 +47,9 @@ impl<'a> RingMut<'a> {
     /// implementation is the raw [`serialize_overlapping`].
     pub fn serialize(&mut self, src: &[u8]) -> SerResult {
         let store_size = self.store_size();
-        // SAFETY: slices from safe borrows; disjoint by construction
+        // SAFETY: both pointers come from live safe borrows, so they are valid
+        // for the lengths passed; a `&mut [u8]` and a `&[u8]` obtained through
+        // the borrow checker cannot overlap.
         unsafe {
             serialize_overlapping(
                 self.store.as_mut_ptr(),
@@ -116,10 +118,16 @@ pub unsafe fn serialize_overlapping(
     }
     let mut idx = advance(store_size, head_idx, *allocated_size);
     for i in 0..len {
-        core::ptr::write(
-            store.add(idx as usize),
-            core::ptr::read(src.add(i as usize)),
-        );
+        // SAFETY: `idx` is kept below `store_size` by `advance`, and `i < len`,
+        // so both accesses are within the ranges the caller guaranteed. The
+        // copy is per-byte through raw pointers precisely so that `src` may
+        // overlap the store, which the C++ loop this mirrors also permits.
+        unsafe {
+            core::ptr::write(
+                store.add(idx as usize),
+                core::ptr::read(src.add(i as usize)),
+            );
+        }
         idx = advance(store_size, idx, 1);
     }
     *allocated_size += len;
@@ -149,10 +157,16 @@ pub unsafe fn peek_bytes_overlapping(
     }
     let mut idx = advance(store_size, head_idx, offset);
     for i in 0..size {
-        core::ptr::write(
-            out.add(i as usize),
-            core::ptr::read(store.add(idx as usize)),
-        );
+        // SAFETY: `idx` stays below `store_size` via `advance`, and `i < size`,
+        // so both accesses are in bounds of the caller-guaranteed ranges.
+        // Per-byte raw copies allow `out` to overlap the store, matching the
+        // C++ loop.
+        unsafe {
+            core::ptr::write(
+                out.add(i as usize),
+                core::ptr::read(store.add(idx as usize)),
+            );
+        }
         idx = advance(store_size, idx, 1);
     }
     Ok(())
@@ -289,6 +303,8 @@ mod tests {
         let mut alloc: FwSizeType = 0;
         let mut high: FwSizeType = 0;
         let src = store.as_ptr();
+        // SAFETY: `store` is a live 8-byte array; `src` aliases it deliberately,
+        // which is exactly the overlap this function is specified to tolerate.
         unsafe {
             serialize_overlapping(store.as_mut_ptr(), 8, head, &mut alloc, &mut high, src, 3)
                 .unwrap();

@@ -132,6 +132,22 @@ class LinuxUartDriver final : public LinuxUartDriverComponentBase {
     //! This method will be called by the new thread to wait for input on the serial port.
     static void serialReadTaskEntry(void* ptr);
 
+  public:
+    //! \brief Write a whole buffer to a file descriptor, resuming on short writes
+    //!
+    //! A tty write may transfer fewer bytes than requested (a signal arrives,
+    //! or the device accepts only part of the data). Reporting that as a plain
+    //! error loses the remainder: the bytes already accepted are on the wire,
+    //! so neither dropping them nor resending the whole buffer is correct.
+    //! This resumes from where the device stopped, and retries EINTR.
+    //!
+    //! \param fd file descriptor to write
+    //! \param data buffer to write
+    //! \param size number of bytes to write
+    //! \param written set to the number of bytes actually written, always
+    //! \return true when all `size` bytes were written
+    static bool writeAll(int fd, const U8* data, FwSizeType size, FwSizeType& written);
+
     Os::Task m_readTask;  //!< task instance for thread to read serial port
 
     std::atomic<FwSizeType> m_bytesSent;      //!< number of bytes sent

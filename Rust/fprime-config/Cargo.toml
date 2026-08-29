@@ -6,3 +6,6 @@ license.workspace = true
 description = "F Prime configuration type aliases and wire constants, generated from the FPP config"
 
 [lib]
+
+[lints]
+workspace = true

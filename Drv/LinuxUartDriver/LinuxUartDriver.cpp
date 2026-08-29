@@ -319,14 +319,22 @@ Drv::ByteStreamStatus LinuxUartDriver ::send_handler(const FwIndexType portNum, 
         FW_ASSERT_NO_OVERFLOW(serBuffer.getSize(), size_t);
         size_t xferSize = static_cast<size_t>(serBuffer.getSize());
 
-        ssize_t stat = ::write(this->m_fd, data, xferSize);
+        // Resume across short writes rather than reporting the whole send as
+        // failed: bytes the device already accepted are on the wire, so the
+        // remainder must be written, not dropped and not resent from the start.
+        FwSizeType written = 0;
+        const bool complete = LinuxUartDriver::writeAll(this->m_fd, data, static_cast<FwSizeType>(xferSize), written);
 
-        if (-1 == stat || static_cast<size_t>(stat) != xferSize) {
+        // Account for every byte that reached the device, complete or not
+        this->m_bytesSent += written;
+
+        if (!complete) {
             Fw::LogStringArg _arg = this->m_device;
-            this->log_WARNING_HI_WriteError(_arg, static_cast<I32>(stat));
-            status = Drv::ByteStreamStatus::OTHER_ERROR;
-        } else {
-            this->m_bytesSent += static_cast<FwSizeType>(stat);
+            this->log_WARNING_HI_WriteError(_arg, static_cast<I32>(written));
+            // Partial progress is retryable from the caller's perspective only
+            // when nothing was consumed; otherwise the stream is truncated and
+            // the caller must not resend the same buffer.
+            status = (written == 0) ? Drv::ByteStreamStatus::SEND_RETRY : Drv::ByteStreamStatus::OTHER_ERROR;
         }
     }
     return status;
@@ -334,6 +342,26 @@ Drv::ByteStreamStatus LinuxUartDriver ::send_handler(const FwIndexType portNum, 
 
 void LinuxUartDriver::recvReturnIn_handler(FwIndexType portNum, Fw::Buffer& fwBuffer) {
     this->deallocate_out(0, fwBuffer);
+}
+
+bool LinuxUartDriver ::writeAll(int fd, const U8* data, FwSizeType size, FwSizeType& written) {
+    FW_ASSERT(data != nullptr);
+    written = 0;
+    while (written < size) {
+        const size_t remaining = static_cast<size_t>(size - written);
+        const ssize_t stat = ::write(fd, &data[written], remaining);
+        if (stat < 0) {
+            if (errno == EINTR) {
+                continue;  // interrupted before transferring anything; retry
+            }
+            return false;  // real error; `written` reports what did get out
+        }
+        if (stat == 0) {
+            return false;  // device accepted nothing and reported no error
+        }
+        written += static_cast<FwSizeType>(stat);
+    }
+    return true;
 }
 
 void LinuxUartDriver ::serialReadTaskEntry(void* ptr) {

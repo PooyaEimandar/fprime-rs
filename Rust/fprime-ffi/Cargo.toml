@@ -14,3 +14,13 @@ fprime-config = { path = "../fprime-config" }
 fprime-core = { path = "../fprime-core" }
 fprime-svc = { path = "../fprime-svc" }
 fprime-utils = { path = "../fprime-utils" }
+
+[lints.rust]
+# Every function in this crate is an `unsafe extern "C"` boundary whose body is
+# the unsafe operation, and each carries a `# Safety` contract in its docs.
+# Wrapping each body in a redundant inner `unsafe` block is queued cleanup, not
+# a safety gap -- see Rust/SAFETY.md.
+unsafe_op_in_unsafe_fn = "allow"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

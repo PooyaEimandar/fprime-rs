@@ -8,3 +8,6 @@ description = "Rust implementations of F Prime utility libraries (CircularBuffer
 [dependencies]
 fprime-config = { path = "../fprime-config" }
 fprime-core = { path = "../fprime-core" }
+
+[lints]
+workspace = true

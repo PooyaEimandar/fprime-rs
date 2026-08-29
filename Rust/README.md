@@ -57,17 +57,34 @@ mixed C++/Rust deployments working at every step.
       replaces. Equivalence to the original algorithm was brute-forced over
       ~12M (list, priority, emptiness) combinations, and `Rust_comqueue_scheduler_ut`
       covers the round-robin rotation across the FFI — which ComQueue's own
-      suite never exercises. **Drivers not started.** `LinuxGpioDriver` and
-      `LinuxI2cDriver` drive char devices through `ioctl` and need new test
-      infrastructure before any port; `LinuxUartDriver` needs no production
-      change — a pty-based characterization test is feasible today and is the
-      real prerequisite. None of the three has usable test coverage now
-      (I2C's `test/ut` is unregistered, does not compile against the current
-      `Fw::Buffer` API, and would require real hardware), and their known
-      defects (UART partial-write data loss, GPIO poll-error spin) are
-      therefore still unfixed
-- [ ] **Phase 6 — Qualification hardening**: Ferrocene toolchain option,
-      Safety-Critical Rust coding guidelines
+      suite never exercises. **`LinuxUartDriver`: characterized and its
+      defect fixed.** It had no tests at all; it now has five, driving a real
+      pseudo-terminal and a deliberately-filled non-blocking pipe. With that
+      oracle in place, the partial-write data loss was fixed as a test-pinned
+      divergence: `writeAll` resumes across short writes and retries `EINTR`
+      instead of reporting the whole send failed, every byte that reached the
+      device is counted, and a send that consumed nothing now returns
+      `SEND_RETRY` rather than `OTHER_ERROR`. The driver's own logic stays
+      C++ — it is termios configuration and libc I/O, with no algorithmic
+      core worth moving. **`LinuxGpioDriver` and `LinuxI2cDriver` remain
+      untouched**: both drive char devices through `ioctl` and need new test
+      infrastructure first, so the GPIO poll-error spin is still unfixed.
+      I2C's `test/ut` is unregistered, does not compile against the current
+      `Fw::Buffer` API, and needs real hardware — it is not coverage
+- [x] **Phase 6 — Qualification hardening**: a safety lint posture enforced
+      workspace-wide (`unsafe_op_in_unsafe_fn` and
+      `clippy::undocumented_unsafe_blocks`, both denied and passing — every
+      unsafe block now carries a justification), plus [SAFETY.md](SAFETY.md)
+      recording what is enforced, what is deliberately *not* enforced and why,
+      the unsafe inventory, and a concrete Ferrocene evaluation. **Ferrocene
+      was evaluated and not adopted**, for reasons that are facts about the
+      toolchain: DO-178C is not certified (only "supports" DAL C efforts), its
+      current release would regress this workspace from Rust 1.97 to ~1.95,
+      `--crate-type staticlib` — the whole design — is outside its qualified
+      options, and only x86-64 Linux hosts produce qualified output. The
+      Safety-Critical Rust Consortium's coding guidelines have nothing to
+      adopt yet: their `unsafety`, `ffi`, and `concurrency` chapters are
+      empty
 - [ ] **Phase 7 — Rust-native component runtime**: full components generated in
       Rust (dispatch, queues, cmd/tlm/event plumbing); no per-component C++
 - [ ] **Phase 8 — `Fw` core in Rust**: serialization/types/buffers become the
