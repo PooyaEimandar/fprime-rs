@@ -17,8 +17,9 @@ and emits:
     (--out-cpp). Compiled into the Rust_Codec module, this is the
     authoritative cross-language drift check: if a project changes a width in
     its FPP config without regenerating the Rust crate, the C++ build fails.
-    Only aliases from FpConfig.fpp/the platform file are checked in C++ (they
-    are guaranteed present in Fw/FPrimeBasicTypes.hpp).
+    Every parsed Fw alias is checked (all are exported via
+    Fw/FPrimeBasicTypes.h; an alias missing there fails the check compile,
+    which is the desired loud behavior).
 
 Usage:
   gen_config.py --platform <PlatformTypes.fpp> --config <FpConfig.fpp> [more...] \
@@ -88,12 +89,8 @@ def main() -> None:
     args = ap.parse_args()
 
     aliases = parse_aliases(args.platform)
-    core_names = set()
-    for i, config in enumerate(args.config):
-        parsed = parse_aliases(config)
-        aliases.update(parsed)
-        if i == 0:
-            core_names = {n for n in parsed if n.startswith("Fw")}
+    for config in args.config:
+        aliases.update(parse_aliases(config))
     consts = parse_constants(args.constants)
 
     fw_names = sorted(n for n in aliases if n.startswith("Fw"))
@@ -136,7 +133,7 @@ def main() -> None:
         "#include <Fw/FPrimeBasicTypes.hpp>",
         "",
     ]
-    for name in sorted(core_names):
+    for name in fw_names:
         cpp.append(
             f'static_assert(sizeof({name}) == {widths[name]}, '
             f'"{name} width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");'
@@ -150,7 +147,7 @@ def main() -> None:
             )
     cpp.append("")
     args.out_cpp.write_text("\n".join(cpp))
-    print(f"wrote {args.out} ({len(fw_names)} aliases) and {args.out_cpp} ({len(core_names)} checked)")
+    print(f"wrote {args.out} ({len(fw_names)} aliases) and {args.out_cpp} ({len(fw_names)} checked)")
 
 
 if __name__ == "__main__":

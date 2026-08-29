@@ -58,12 +58,21 @@ void FprimeFramer ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const 
     struct AllocContext {
         FprimeFramer* component;
         Fw::Buffer buffer;
+        const U8* payload;
+        FwSizeType payloadSize;
     };
-    AllocContext allocContext{this, Fw::Buffer()};
+    AllocContext allocContext{this, Fw::Buffer(), data.getData(), data.getSize()};
     // Captureless lambda in member scope: may call the protected port method
     const FprimeRsAllocFn allocate = [](void* raw, FwSizeType size) -> FprimeRsByteView {
         AllocContext* ctx = static_cast<AllocContext*>(raw);
         ctx->buffer = ctx->component->bufferAllocate_out(0, size);
+        if (ctx->buffer.isValid()) {
+            // Rust slice aliasing rules forbid the allocation overlapping the
+            // payload (Phase 1 shim convention; a sane allocator never does)
+            const U8* alloc_begin = ctx->buffer.getData();
+            const U8* alloc_end = alloc_begin + ctx->buffer.getSize();
+            FW_ASSERT(ctx->payload + ctx->payloadSize <= alloc_begin || alloc_end <= ctx->payload);
+        }
         FprimeRsByteView view;
         view.ptr = ctx->buffer.isValid() ? ctx->buffer.getData() : nullptr;
         view.len = ctx->buffer.isValid() ? ctx->buffer.getSize() : 0;

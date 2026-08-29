@@ -42,21 +42,23 @@ impl<'a> RingMut<'a> {
         self.store.len() as FwSizeType
     }
 
-    /// Mirrors `CircularBuffer::serialize(const U8*, FwSizeType)`.
+    /// Mirrors `CircularBuffer::serialize(const U8*, FwSizeType)`. Borrow
+    /// rules make overlap impossible through this safe API; the shared
+    /// implementation is the raw [`serialize_overlapping`].
     pub fn serialize(&mut self, src: &[u8]) -> SerResult {
-        let size = src.len() as FwSizeType;
-        // Corruption defense the C++ get_free_size() FW_ASSERTs in every build
-        assert!(*self.allocated_size <= self.store_size());
-        if size > self.store_size() - *self.allocated_size {
-            return Err(SerError::NoRoomLeft);
+        let store_size = self.store_size();
+        // SAFETY: slices from safe borrows; disjoint by construction
+        unsafe {
+            serialize_overlapping(
+                self.store.as_mut_ptr(),
+                store_size,
+                *self.head_idx,
+                self.allocated_size,
+                self.high_water_mark,
+                src.as_ptr(),
+                src.len() as FwSizeType,
+            )
         }
-        let mut idx = advance(self.store_size(), *self.head_idx, *self.allocated_size);
-        for &byte in src {
-            self.store[idx as usize] = byte;
-            idx = advance(self.store_size(), idx, 1);
-        }
-        self.commit(size);
-        Ok(())
     }
 
     /// Mirrors the bookkeeping tail of the C++ serialize paths: grow the
@@ -87,6 +89,73 @@ impl<'a> RingMut<'a> {
         *self.allocated_size -= amount;
         Ok(())
     }
+}
+
+/// Overlap-tolerant serialize used by the FFI: the C++ per-byte copy loop is
+/// well-defined when `src` overlaps the ring store (in-tree code serializes a
+/// ring's own storage into itself), so this variant mirrors that loop with
+/// raw pointer reads/writes — identical order, hence identical bytes — and
+/// never materializes a `src` slice.
+///
+/// # Safety
+/// `store` must point to `store_size` writable bytes; `src` to `len` readable
+/// bytes; the head/alloc/high references must not alias the byte ranges.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn serialize_overlapping(
+    store: *mut u8,
+    store_size: FwSizeType,
+    head_idx: FwSizeType,
+    allocated_size: &mut FwSizeType,
+    high_water_mark: &mut FwSizeType,
+    src: *const u8,
+    len: FwSizeType,
+) -> SerResult {
+    assert!(*allocated_size <= store_size);
+    if len > store_size - *allocated_size {
+        return Err(SerError::NoRoomLeft);
+    }
+    let mut idx = advance(store_size, head_idx, *allocated_size);
+    for i in 0..len {
+        core::ptr::write(
+            store.add(idx as usize),
+            core::ptr::read(src.add(i as usize)),
+        );
+        idx = advance(store_size, idx, 1);
+    }
+    *allocated_size += len;
+    if *allocated_size > *high_water_mark {
+        *high_water_mark = *allocated_size;
+    }
+    Ok(())
+}
+
+/// Overlap-tolerant peek used by the FFI: the C++ per-byte loop permits `out`
+/// overlapping the store; mirror it with raw pointers, identical order.
+///
+/// # Safety
+/// `store` must point to `store_size` readable bytes; `out` to `size`
+/// writable bytes.
+pub unsafe fn peek_bytes_overlapping(
+    store: *const u8,
+    store_size: FwSizeType,
+    head_idx: FwSizeType,
+    allocated_size: FwSizeType,
+    offset: FwSizeType,
+    out: *mut u8,
+    size: FwSizeType,
+) -> SerResult {
+    if size.wrapping_add(offset) > allocated_size {
+        return Err(SerError::BufferEmpty);
+    }
+    let mut idx = advance(store_size, head_idx, offset);
+    for i in 0..size {
+        core::ptr::write(
+            out.add(i as usize),
+            core::ptr::read(store.add(idx as usize)),
+        );
+        idx = advance(store_size, idx, 1);
+    }
+    Ok(())
 }
 
 impl<'a> RingRef<'a> {
@@ -209,6 +278,25 @@ mod tests {
         let mut ring = Ring::new();
         ring.as_mut().serialize(&[0x01, 0x02, 0x03, 0x04]).unwrap();
         assert_eq!(ring.as_ref().peek_u32(0).unwrap(), 0x0102_0304);
+    }
+
+    #[test]
+    fn overlapping_source_matches_cpp_loop() {
+        // Serialize a ring's own store into itself (the in-tree detector
+        // tests do this): result must match the C++ per-byte loop order.
+        let mut store = [9u8, 8, 7, 6, 0, 0, 0, 0];
+        let mut head: FwSizeType = 0;
+        let mut alloc: FwSizeType = 0;
+        let mut high: FwSizeType = 0;
+        let src = store.as_ptr();
+        unsafe {
+            serialize_overlapping(store.as_mut_ptr(), 8, head, &mut alloc, &mut high, src, 3)
+                .unwrap();
+        }
+        let _ = &mut head;
+        // C++ loop: writes store[0]=src[0](9), store[1]=src[1](8), store[2]=src[2](7)
+        assert_eq!(&store[..4], &[9, 8, 7, 6]);
+        assert_eq!(alloc, 3);
     }
 
     #[test]

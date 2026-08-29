@@ -25,6 +25,11 @@ static_assert(Svc::FprimeProtocol::FrameHeader::SERIALIZED_SIZE == 8,
               "FrameHeader size changed: update Rust/fprime-svc protocol constants");
 static_assert(Svc::FprimeProtocol::FrameTrailer::SERIALIZED_SIZE == 4,
               "FrameTrailer size changed: update Rust/fprime-svc protocol constants");
+// The Rust logic and the FprimeRsDeframeResult layout use the generated
+// fprime-config width for the packet descriptor; pin the C++ side to it
+// (RustConfigCheck.cpp also asserts this via the generated battery)
+static_assert(sizeof(FwPacketDescriptorType) == 2,
+              "FwPacketDescriptorType width changed: regenerate Rust/fprime-config");
 
 namespace Svc {
 
@@ -45,6 +50,10 @@ FprimeDeframer ::~FprimeDeframer() {}
 // ----------------------------------------------------------------------
 
 void FprimeDeframer ::dataIn_handler(FwIndexType portNum, Fw::Buffer& data, const ComCfg::FrameContext& context) {
+    // A null-data buffer with a nonzero size is a contract violation; the
+    // original C++ FW_ASSERTs on it deterministically (via a failed header
+    // deserialize) — fail the same way rather than handing Rust a null slice
+    FW_ASSERT((data.getSize() == 0) || (data.getData() != nullptr));
     FprimeRsDeframeResult result;
     fprime_rs_deframer_deframe(data.getData(), data.getSize(), &result);
 

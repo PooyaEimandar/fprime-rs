@@ -7,9 +7,18 @@
 #
 ####
 
+# fprime-rs: the accumulate/detect/extract orchestration has a Rust
+# implementation behind the unchanged component class;
+# FPRIME_RUST_IMPL_SVC_FRAME_ACCUMULATOR selects it (see Rust/enable.cmake).
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_SVC_FRAME_ACCUMULATOR)
+  set(FRAME_ACCUMULATOR_IMPL "${CMAKE_CURRENT_LIST_DIR}/FrameAccumulatorRust.cpp")
+else()
+  set(FRAME_ACCUMULATOR_IMPL "${CMAKE_CURRENT_LIST_DIR}/FrameAccumulator.cpp")
+endif()
+
 register_fprime_library(
   SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/FrameAccumulator.cpp"
+    "${FRAME_ACCUMULATOR_IMPL}"
     "${CMAKE_CURRENT_LIST_DIR}/FrameDetector/FprimeFrameDetector.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/FrameDetector/CcsdsTcFrameDetector.cpp"
   AUTOCODER_INPUTS
@@ -20,6 +29,10 @@ register_fprime_library(
     Svc_Ccsds_Types
 )
 target_compile_options(${FPRIME_CURRENT_MODULE} PRIVATE -Wno-tautological-constant-out-of-range-compare -Wno-type-limits)
+
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_SVC_FRAME_ACCUMULATOR AND NOT FPRIME_IS_SUB_BUILD)
+  target_link_libraries("${FPRIME_CURRENT_MODULE}" PUBLIC fprime_rust)
+endif()
 
 #### UTs ####
 register_fprime_ut(

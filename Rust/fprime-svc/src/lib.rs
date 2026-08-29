@@ -7,8 +7,10 @@
 //! which runs unchanged against the Rust-backed component.
 #![cfg_attr(not(test), no_std)]
 
+pub mod accumulator;
 pub mod deframer;
 pub mod framer;
+pub mod router_table;
 
 /// F Prime protocol constants, mirroring `Svc/FprimeProtocol/FprimeProtocol.fpp`
 /// (`FrameHeader { startWord: U32 = 0xdeadbeef, lengthField: U32 }`,

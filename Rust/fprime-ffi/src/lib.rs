@@ -320,8 +320,16 @@ pub unsafe extern "C" fn fprime_rs_cb_serialize(
     src: *const u8,
     size: FwSizeType,
 ) -> i32 {
-    let mut ring = ring_mut(store, store_size, head, alloc, high);
-    status_code(&ring.serialize(view(src, size as usize)))
+    let head_value = *head;
+    status_code(&circular::serialize_overlapping(
+        store,
+        store_size,
+        head_value,
+        &mut *alloc,
+        &mut *high,
+        src,
+        size,
+    ))
 }
 
 /// Bookkeeping for the C++ shim's direct-write serialize path.
@@ -392,12 +400,9 @@ pub unsafe extern "C" fn fprime_rs_cb_peek_bytes(
     out: *mut u8,
     size: FwSizeType,
 ) -> i32 {
-    let ring = circular::RingRef {
-        store: view(store, store_size as usize),
-        head_idx: head,
-        allocated_size: alloc,
-    };
-    status_code(&ring.peek_bytes(view_mut(out, size as usize), offset))
+    status_code(&circular::peek_bytes_overlapping(
+        store, store_size, head, alloc, offset, out, size,
+    ))
 }
 
 /// Mirrors `CircularBuffer::peek(U8&, FwSizeType)`.
@@ -571,5 +576,156 @@ pub unsafe extern "C" fn fprime_rs_framer_frame(
             0
         }
         Err(framer::NoBuffer) => 1,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Svc components: FrameAccumulator, FprimeRouter (Phase 3)
+// ---------------------------------------------------------------------------
+
+use fprime_svc::{accumulator, router_table};
+
+/// The C++ trampoline table driving the FrameAccumulator orchestration.
+/// Every member is a captureless-lambda trampoline over the component; the
+/// layout must match FprimeRsAccumulatorOps in Rust/RustSvc.h. See that
+/// header for the no-unwind contract on all callbacks.
+#[repr(C)]
+pub struct AccumulatorOpsFfi {
+    pub ctx: *mut core::ffi::c_void,
+    pub ring_free: unsafe extern "C" fn(*mut core::ffi::c_void) -> FwSizeType,
+    pub ring_allocated: unsafe extern "C" fn(*mut core::ffi::c_void) -> FwSizeType,
+    pub ring_capacity: unsafe extern "C" fn(*mut core::ffi::c_void) -> FwSizeType,
+    pub ring_serialize: unsafe extern "C" fn(*mut core::ffi::c_void, *const u8, FwSizeType) -> i32,
+    pub ring_rotate: unsafe extern "C" fn(*mut core::ffi::c_void, FwSizeType) -> i32,
+    pub detect: unsafe extern "C" fn(*mut core::ffi::c_void, *mut FwSizeType) -> i32,
+    pub allocate_frame: unsafe extern "C" fn(*mut core::ffi::c_void, FwSizeType) -> u8,
+    pub peek_into_frame: unsafe extern "C" fn(*mut core::ffi::c_void, FwSizeType) -> i32,
+    pub emit_frame: unsafe extern "C" fn(*mut core::ffi::c_void),
+    pub log_frame_size_error: unsafe extern "C" fn(*mut core::ffi::c_void, FwSizeType),
+    pub log_no_buffer: unsafe extern "C" fn(*mut core::ffi::c_void),
+    pub log_frame_dropped: unsafe extern "C" fn(*mut core::ffi::c_void),
+}
+
+struct AccumulatorEnvFfi<'a> {
+    ops: &'a AccumulatorOpsFfi,
+}
+
+impl accumulator::Env for AccumulatorEnvFfi<'_> {
+    fn ring_free(&mut self) -> u64 {
+        unsafe { (self.ops.ring_free)(self.ops.ctx) }
+    }
+    fn ring_allocated(&mut self) -> u64 {
+        unsafe { (self.ops.ring_allocated)(self.ops.ctx) }
+    }
+    fn ring_capacity(&mut self) -> u64 {
+        unsafe { (self.ops.ring_capacity)(self.ops.ctx) }
+    }
+    fn ring_serialize(&mut self, bytes: &[u8]) -> i32 {
+        unsafe {
+            (self.ops.ring_serialize)(self.ops.ctx, bytes.as_ptr(), bytes.len() as FwSizeType)
+        }
+    }
+    fn ring_rotate(&mut self, amount: u64) -> i32 {
+        unsafe { (self.ops.ring_rotate)(self.ops.ctx, amount) }
+    }
+    fn detect(&mut self) -> (i32, u64) {
+        let mut size_out: FwSizeType = 0;
+        let status = unsafe { (self.ops.detect)(self.ops.ctx, &mut size_out) };
+        (status, size_out)
+    }
+    fn allocate_frame(&mut self, size: u64) -> bool {
+        unsafe { (self.ops.allocate_frame)(self.ops.ctx, size) != 0 }
+    }
+    fn peek_into_frame(&mut self, size: u64) -> i32 {
+        unsafe { (self.ops.peek_into_frame)(self.ops.ctx, size) }
+    }
+    fn emit_frame(&mut self) {
+        unsafe { (self.ops.emit_frame)(self.ops.ctx) }
+    }
+    fn log_frame_size_error(&mut self, size: u64) {
+        unsafe { (self.ops.log_frame_size_error)(self.ops.ctx, size) }
+    }
+    fn log_no_buffer(&mut self) {
+        unsafe { (self.ops.log_no_buffer)(self.ops.ctx) }
+    }
+    fn log_frame_dropped(&mut self) {
+        unsafe { (self.ops.log_frame_dropped)(self.ops.ctx) }
+    }
+}
+
+/// Run the FrameAccumulator processing loop over one incoming buffer
+/// (mirrors `processBuffer` + `processRing`).
+///
+/// # Safety
+/// `ops` must point to a fully-populated trampoline table whose callbacks are
+/// valid for `ops.ctx` and do not unwind; `data` must point to `len` readable
+/// bytes (null allowed when `len` is 0).
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_accumulator_process(
+    ops: *const AccumulatorOpsFfi,
+    data: *const u8,
+    len: FwSizeType,
+) {
+    let mut env = AccumulatorEnvFfi { ops: &*ops };
+    accumulator::process_buffer(&mut env, view(data, len as usize));
+}
+
+/// Claim a free slot in the router's buffer-context table for `key` (the
+/// buffer's data pointer). Returns the slot index, or -1 when the table is
+/// full. See Rust/fprime-svc/src/router_table.rs for the layout contract.
+///
+/// # Safety
+/// `state0`/`key0`/`stride`/`count` must describe the live C++ entry array
+/// per the TableView contract; no concurrent access during the call.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_router_table_insert(
+    state0: *mut u8,
+    key0: *mut u8,
+    stride: FwSizeType,
+    count: FwSizeType,
+    active: i32,
+    inactive: i32,
+    key: *const u8,
+) -> i64 {
+    let table = router_table::TableView {
+        state0,
+        key0,
+        stride: stride as usize,
+        count: count as usize,
+        active,
+        inactive,
+    };
+    match table.insert(key as usize) {
+        Some(index) => index as i64,
+        None => -1,
+    }
+}
+
+/// Find and release the active slot for `key`. Returns the slot index for
+/// the shim to copy the context from, or -1 when not found.
+///
+/// # Safety
+/// Same contract as [`fprime_rs_router_table_insert`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_router_table_take(
+    state0: *mut u8,
+    key0: *mut u8,
+    stride: FwSizeType,
+    count: FwSizeType,
+    active: i32,
+    inactive: i32,
+    key: *const u8,
+) -> i64 {
+    let table = router_table::TableView {
+        state0,
+        key0,
+        stride: stride as usize,
+        count: count as usize,
+        active,
+        inactive,
+    };
+    match table.take(key as usize) {
+        Some(index) => index as i64,
+        None => -1,
     }
 }

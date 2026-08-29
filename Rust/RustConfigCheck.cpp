@@ -17,6 +17,7 @@ static_assert(sizeof(FwEventIdType) == 4, "FwEventIdType width changed: regenera
 static_assert(sizeof(FwIdType) == 4, "FwIdType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");
 static_assert(sizeof(FwIndexType) == 2, "FwIndexType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");
 static_assert(sizeof(FwOpcodeType) == 4, "FwOpcodeType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");
+static_assert(sizeof(FwPacketDescriptorType) == 2, "FwPacketDescriptorType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");
 static_assert(sizeof(FwPrmIdType) == 4, "FwPrmIdType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");
 static_assert(sizeof(FwQueuePriorityType) == 1, "FwQueuePriorityType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");
 static_assert(sizeof(FwSignedSizeType) == 8, "FwSignedSizeType width changed: regenerate Rust/fprime-config (tools/fprime-rs/gen_config.py)");

@@ -13,11 +13,21 @@ mixed C++/Rust deployments working at every step.
       oracle; per-module `FPRIME_RUST_IMPL_*` rollback switches proven both
       ways (Queue's orchestration stays C++ atop the Rust engine — its header
       encapsulation blocks direct porting until Phase 4 codegen)
-- [ ] **Phase 2 — First components**: `Svc/FprimeDeframer`, then
-      `Svc/FprimeFramer` (hand-written shims); Ref GDS integration in a mixed
-      deployment
-- [ ] **Phase 3 — Stateful data path**: `Svc/FrameAccumulator`,
-      `Svc/FprimeRouter`; all-Rust uplink chain
+- [x] **Phase 2 — First components**: `Svc/FprimeDeframer` and
+      `Svc/FprimeFramer` logic in Rust (`fprime-svc` crate) behind unchanged
+      component classes; the framer calls the `bufferAllocate` returning port
+      from inside Rust via a trampoline; component UTs green Rust-backed, and
+      the Ref GDS integration suite (11 tests) passes against the mixed
+      deployment (Ref's CCSDS stack runs the Phase 1 Rust engine; these two
+      components serve ComFprime-based deployments)
+- [x] **Phase 3 — Stateful data path**: `FrameAccumulator`'s full
+      accumulate/detect/extract orchestration in Rust driving the component
+      through a 13-callback trampoline table (ring, detector, allocation,
+      events); `FprimeRouter`'s buffer-context table state machine in Rust
+      over the C++-resident entries; ring engine made overlap-tolerant
+      (raw-pointer per-byte copy, matching the C++ loop) after in-tree
+      detector tests exposed self-serialization; all suites green and Ref GDS
+      integration 11/11 with the Rust orchestration live in the uplink
 - [ ] **Phase 4 — Codegen**: `fpp-to-rust` fed by `fpp-to-json` + a `rust.cmake`
       autocoder; retrofit ported components, prove generated glue identical
 - [ ] **Phase 5 — Active components and drivers**: `Svc/ComQueue`, then

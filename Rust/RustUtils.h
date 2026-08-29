@@ -10,9 +10,9 @@
 // non-null buffers) are FW_ASSERTed on the C++ side before calling.
 //
 // Overlap contract: the src/out buffers of fprime_rs_cb_serialize and
-// fprime_rs_cb_peek_bytes must not overlap the ring store (Rust slice
-// aliasing rules; the shim FW_ASSERTs this). The original C++ per-byte
-// copies tolerated overlap; no framework caller relies on it.
+// fprime_rs_cb_peek_bytes MAY overlap the ring store — the Rust side copies
+// through raw pointers in the same per-byte order as the original C++ loop
+// (in-tree detector tests serialize a ring's own storage into itself).
 // ======================================================================
 #ifndef FPRIME_RUST_UTILS_H
 #define FPRIME_RUST_UTILS_H
