@@ -26,6 +26,7 @@ import shimgen
 from shimgen import REPO
 
 import gen_fw_kernel
+import gen_fw_strings
 import gen_fw_time
 import gen_os_filepath
 import gen_os_maxheap
@@ -86,6 +87,35 @@ CASES = [
                 "source",
                 "this->m_val.set_timeBase(timeBase);",
                 "this->m_val.set_timeBase(TimeBase::TB_NONE);",
+                False,
+            ),
+        ],
+    ),
+    (
+        gen_fw_strings.SHIM,
+        [
+            (
+                "upstream edit inside a replaced body (string_length)",
+                "source",
+                "if (source[length] == '\\0') {",
+                "if (source[length] == ' ') {",
+                False,
+            ),
+            (
+                "upstream edit inside a replaced body: the zero-size match index",
+                "source",
+                "match_index = source_size - 1;",
+                "match_index = source_size - 2;",
+                False,
+            ),
+            (
+                # Every definition in this file is replaced, so the only
+                # content outside a body is the include block -- which is
+                # exactly where a new upstream dependency would appear.
+                "upstream edit outside every replaced body",
+                "source",
+                "#include <Fw/Types/ExternalString.hpp>",
+                "#include <Fw/Types/StringBase.hpp>",
                 False,
             ),
         ],

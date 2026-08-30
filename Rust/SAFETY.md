@@ -218,11 +218,18 @@ deliberate; it is recorded here rather than left implicit.
 `FW_FILENAME_ASSERT`, the default assert mode, reports `__FILE__`. A generated
 shim is a different file from the one it replaces, so an assert inside it
 names e.g. `TimeRust.cpp` rather than `Time.cpp`. Under the other two modes
-this is avoidable and is avoided: `Fw/Time/CMakeLists.txt` recomputes
-`ASSERT_FILE_ID` and `ASSERT_RELATIVE_PATH` from the original's path, so the
-fault identity a flight system keys on is unchanged. Under `FW_FILENAME_ASSERT`
-it is not avoidable without misreporting line numbers, and `Fw/Time`'s death
-tests were widened to accept either name.
+this is avoidable and is avoided: `Fw/Time/CMakeLists.txt` and
+`Fw/Types/CMakeLists.txt` recompute `ASSERT_FILE_ID` and
+`ASSERT_RELATIVE_PATH` from each original's path, so the fault identity a
+flight system keys on is unchanged. Under `FW_FILENAME_ASSERT` it is not
+avoidable without misreporting line numbers, and `Fw/Time`'s death tests were
+widened to accept either name.
+
+This matters more for `StringUtilsRust.cpp` than for the others, because
+`Fw::StringUtils` asserts on caller mistakes — a null string, an overlapping
+copy — rather than on internal invariants. Those are the asserts a deployment
+is most likely to actually hit, so they are the ones whose reported identity
+is worth keeping stable.
 
 ## Reading a Rust-side fault in telemetry
 

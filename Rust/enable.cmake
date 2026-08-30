@@ -56,6 +56,11 @@ option(FPRIME_RUST_IMPL_OS_FILEPATH "Use the Rust path resolution and containmen
 # carry on addition, the borrow on subtraction, and the F64 split. Bounded
 # per-call work on a type every timestamp goes through.
 option(FPRIME_RUST_IMPL_FW_TIME "Use the Rust Fw::Time arithmetic" ON)
+# Phase 14: Fw::StringUtils -- bounded length, copy, last-N and both substring
+# searches. Every Fw::String assignment and every Fw::StringBase::length goes
+# through these, but each call is one bounded scan rather than the per-field
+# tax the Fw kernel above imposes, so this defaults ON.
+option(FPRIME_RUST_IMPL_FW_STRINGS "Use the Rust Fw::StringUtils primitives" ON)
 
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH

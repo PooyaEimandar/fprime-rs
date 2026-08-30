@@ -1,5 +1,8 @@
 build/
 build-fprime-*/
+# The switch-OFF build cache: created by the rust.yml workflow's
+# "C++ originals still compile" step and by Rust/test/differential/run.sh.
+build-rust-off/
 build-artifacts/
 gtest/
 docs-cache/

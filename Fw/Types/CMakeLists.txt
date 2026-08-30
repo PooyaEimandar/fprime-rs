@@ -11,6 +11,15 @@ else()
     set(FW_SERIALIZABLE_IMPL "${CMAKE_CURRENT_LIST_DIR}/Serializable.cpp")
 endif()
 
+# fprime-rs Phase 14: the bounded C-string primitives can run in Rust.
+# StringUtilsRust.cpp is generated from StringUtils.cpp by
+# tools/fprime-rs/gen_fw_strings.py.
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_STRINGS)
+    set(FW_STRINGUTILS_IMPL "${CMAKE_CURRENT_LIST_DIR}/StringUtilsRust.cpp")
+else()
+    set(FW_STRINGUTILS_IMPL "${CMAKE_CURRENT_LIST_DIR}/StringUtils.cpp")
+endif()
+
 register_fprime_module(
     Fw_Types
   SOURCES
@@ -22,7 +31,7 @@ register_fprime_module(
     "${CMAKE_CURRENT_LIST_DIR}/SerialBuffer.cpp"
     "${FW_SERIALIZABLE_IMPL}"
     "${CMAKE_CURRENT_LIST_DIR}/StringBase.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/StringUtils.cpp"
+    "${FW_STRINGUTILS_IMPL}"
     "${CMAKE_CURRENT_LIST_DIR}/StringToNumber.cpp"
   AUTOCODER_INPUTS
     "${CMAKE_CURRENT_LIST_DIR}/Types.fpp"
@@ -58,6 +67,46 @@ if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_TYPES AND NOT FPRIME_IS_SUB_BUIL
     add_custom_target(Fw_Types_rust_kernel_verify
                       DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/SerializableRust.verified")
     add_dependencies(Fw_Types Fw_Types_rust_kernel_verify)
+endif()
+
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_STRINGS)
+    # The shim *is* the implementation of StringUtils.cpp, so it must fault as
+    # StringUtils.cpp. F Prime derives ASSERT_FILE_ID and ASSERT_RELATIVE_PATH
+    # from each source file's own path, which would otherwise make every
+    # assert in Fw::StringUtils report a file that does not exist upstream --
+    # changing the fault signature flight software keys on. Recompute both
+    # from the original's path, the same way cmake/utilities.cmake
+    # set_assert_flags does.
+    string(REPLACE "${FPRIME_FRAMEWORK_PATH}/" "" FPRIME_STRINGUTILS_SHORT_SRC
+           "${CMAKE_CURRENT_LIST_DIR}/StringUtils.cpp")
+    string(MD5 FPRIME_STRINGUTILS_HASH "${FPRIME_STRINGUTILS_SHORT_SRC}")
+    string(SUBSTRING "${FPRIME_STRINGUTILS_HASH}" 0 8 FPRIME_STRINGUTILS_FILE_ID)
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/StringUtilsRust.cpp" PROPERTIES
+        COMPILE_FLAGS
+        "-DASSERT_FILE_ID=0x${FPRIME_STRINGUTILS_FILE_ID} -DASSERT_RELATIVE_PATH='\"${FPRIME_STRINGUTILS_SHORT_SRC}\"'")
+endif()
+
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_STRINGS AND NOT FPRIME_IS_SUB_BUILD)
+    # Unconditional even when FPRIME_RUST_IMPL_FW_TYPES is OFF: the switches
+    # are independent, and this one puts Rust calls in Fw_Types on its own.
+    target_link_libraries(Fw_Types PUBLIC fprime_rust)
+
+    # StringUtilsRust.cpp is a generated near-copy of StringUtils.cpp; verify
+    # on every build that it is still what the generator produces.
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/StringUtilsRust.verified"
+        COMMAND "${PYTHON}" "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_fw_strings.py" "--check"
+        COMMAND "${CMAKE_COMMAND}" "-E" "touch" "${CMAKE_CURRENT_BINARY_DIR}/StringUtilsRust.verified"
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/StringUtils.cpp"
+                "${CMAKE_CURRENT_LIST_DIR}/StringUtilsRust.cpp"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_fw_strings.py"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/shimgen.py"
+        COMMENT "[rust] Verifying the Rust-backed Fw::StringUtils matches StringUtils.cpp"
+        VERBATIM
+    )
+    add_custom_target(Fw_Types_rust_strings_verify
+                      DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/StringUtilsRust.verified")
+    add_dependencies(Fw_Types Fw_Types_rust_strings_verify)
 endif()
 
 register_fprime_implementation(

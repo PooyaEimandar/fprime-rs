@@ -1849,6 +1849,11 @@ TEST(OffNominal, sub_string_source_and_substring_zero_size) {
     const char* source_string = "";
     const char* sub_string = "";
     ASSERT_EQ(Fw::StringUtils::substring_find(source_string, 0, sub_string, 0), 0);
+    // Not symmetric with the forward search, and deliberately so: the reverse
+    // search's zero-size special case requires a non-empty source, so with an
+    // empty one it falls through to a loop whose body never runs and reports
+    // no match.
+    ASSERT_EQ(Fw::StringUtils::substring_find_last(source_string, 0, sub_string, 0), -1);
 }
 
 TEST(OffNominal, sub_string_last_no_match) {

@@ -279,7 +279,7 @@ extern "C" fn rust_eh_personality() {}
 // Utils: CircularBuffer engine, CRC32, CFDP checksum (Phase 1)
 // ---------------------------------------------------------------------------
 
-use fprime_config::FwSizeType;
+use fprime_config::{FwSignedSizeType, FwSizeType};
 use fprime_utils::{checksum, circular, crc32};
 
 // The FFI converts FwSizeType (u64 per config) to usize with `as` casts. On a
@@ -1821,5 +1821,152 @@ pub unsafe extern "C" fn fprime_rs_time_layout(
         *base_offset = (core::ptr::addr_of!(probe.time_base) as usize - origin) as FwSizeType;
         *seconds_offset = (core::ptr::addr_of!(probe.seconds) as usize - origin) as FwSizeType;
         *useconds_offset = (core::ptr::addr_of!(probe.useconds) as usize - origin) as FwSizeType;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fw::StringUtils (Phase 14)
+// ---------------------------------------------------------------------------
+//
+// The bounded C-string primitives every string in the framework rests on:
+// `Fw::StringBase::length` is `string_length`, every `Fw::String` assignment
+// is `string_copy`, and `Os::FilePathUtils` searches with `substring_find`.
+// Pure character arithmetic against an explicit bound, which is both the
+// reason it is worth moving and the reason an off-by-one here is expensive.
+//
+// The C++ shim keeps every pointer-level precondition -- the null checks, the
+// self-copy short-circuit, the non-overlap assert -- because those are facts
+// about pointers that Rust's slices cannot express once the pointers have
+// been split apart. What crosses is the decision.
+
+use fprime_core::strings;
+
+/// `Fw::StringUtils::string_length(const CHAR*, FwSizeType)`.
+///
+/// Scans byte by byte rather than materializing a `buffer_size`-long slice,
+/// for the reason [`c_str_len`] documents: callers pass the bound they are
+/// willing to read *up to*, and a shorter buffer is legitimate. `c_str_len`
+/// is this same scan; the only difference is that it reports "no terminator"
+/// as `None` where this reports it as the bound itself.
+///
+/// # Safety
+/// `source` must be non-null and readable up to its terminator, or for
+/// `buffer_size` bytes if it has none.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_string_length(
+    source: *const u8,
+    buffer_size: FwSizeType,
+) -> FwSizeType {
+    let limit = buffer_size as usize;
+    // SAFETY: forwarded from the caller; the shim asserts non-null first.
+    (unsafe { c_str_len(source, limit) }).unwrap_or(limit) as FwSizeType
+}
+
+/// Offset of the last `n` characters of `source`, for
+/// `Fw::StringUtils::string_last_n`.
+///
+/// Returns an offset rather than the C++'s pointer: the shim adds it back to
+/// the pointer it already holds, so nothing derived from a pointer has to
+/// make the round trip and come back still valid.
+///
+/// # Safety
+/// As [`fprime_rs_string_length`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_string_last_n_offset(
+    source: *const u8,
+    n: FwSizeType,
+    buffer_size: FwSizeType,
+) -> FwSizeType {
+    // SAFETY: forwarded from the caller.
+    let length = unsafe { fprime_rs_string_length(source, buffer_size) };
+    strings::last_n_offset(length as usize, n as usize) as FwSizeType
+}
+
+/// `Fw::StringUtils::string_copy(char*, const char*, FwSizeType)`.
+///
+/// The C++ returns `destination`, which the shim still returns; this reports
+/// the byte count written including the terminator, which the shim discards.
+///
+/// The source is scanned before being borrowed. `string_copy(dst, "ab", 100)`
+/// is legal C++ -- `num` bounds the *destination*, and `strncpy` stops at the
+/// source's terminator -- so materializing a `num`-byte slice from a 3-byte
+/// string would be UB for a call the original handles fine.
+///
+/// # Safety
+/// `destination` must point to `num` writable bytes and `source` must be
+/// terminated within `num`, or readable for `num` bytes. The two must not
+/// overlap; the shim asserts that, as the original does.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_string_copy(
+    destination: *mut u8,
+    source: *const u8,
+    num: FwSizeType,
+) -> FwSizeType {
+    let n = num as usize;
+    if n == 0 {
+        return 0;
+    }
+    // SAFETY: the caller guarantees a terminator within `num` or `num`
+    // readable bytes; the scan stops at whichever comes first.
+    let length = (unsafe { c_str_len(source, n) }).unwrap_or(n);
+    // Content only: the scan above is the boundary's job, and it is the only
+    // one that happens. `strings::string_copy` copies what it is handed.
+    // SAFETY: `length` bytes were just proven readable by the scan above.
+    let source = unsafe { core::slice::from_raw_parts(source, length) };
+    // SAFETY: the caller guarantees `num` writable bytes at `destination`.
+    let destination = unsafe { view_mut(destination, n) };
+    strings::string_copy(destination, source, n) as FwSizeType
+}
+
+/// `Fw::StringUtils::substring_find`: first match, or -1.
+///
+/// # Safety
+/// `source` must be readable for `source_size` bytes and `sub` for
+/// `sub_size`; both must be non-null unless their size is zero.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_substring_find(
+    source: *const u8,
+    source_size: FwSizeType,
+    sub: *const u8,
+    sub_size: FwSizeType,
+) -> FwSignedSizeType {
+    // SAFETY: the caller guarantees both extents; `view` handles length zero.
+    let (source, sub) = unsafe {
+        (
+            view(source, source_size as usize),
+            view(sub, sub_size as usize),
+        )
+    };
+    match strings::find(source, sub) {
+        Some(at) => at as FwSignedSizeType,
+        None => -1,
+    }
+}
+
+/// `Fw::StringUtils::substring_find_last`: last match, or -1.
+///
+/// Note the asymmetry with [`fprime_rs_substring_find`] for an empty needle:
+/// forward it matches at 0, backward at `source_size - 1`. That is the
+/// original's behaviour and `Rust/fprime-core/src/strings.rs` pins it.
+///
+/// # Safety
+/// As [`fprime_rs_substring_find`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_substring_find_last(
+    source: *const u8,
+    source_size: FwSizeType,
+    sub: *const u8,
+    sub_size: FwSizeType,
+) -> FwSignedSizeType {
+    // SAFETY: the caller guarantees both extents; `view` handles length zero.
+    let (source, sub) = unsafe {
+        (
+            view(source, source_size as usize),
+            view(sub, sub_size as usize),
+        )
+    };
+    match strings::rfind(source, sub) {
+        Some(at) => at as FwSignedSizeType,
+        None => -1,
     }
 }

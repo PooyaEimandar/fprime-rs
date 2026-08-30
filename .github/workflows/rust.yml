@@ -130,6 +130,7 @@ jobs:
           python3 tools/fprime-rs/gen_os_maxheap.py --check
           python3 tools/fprime-rs/gen_os_filepath.py --check
           python3 tools/fprime-rs/gen_fw_time.py --check
+          python3 tools/fprime-rs/gen_fw_strings.py --check
       - name: The drift check itself still catches drift
         # Every --check above runs against a pristine tree, so it only ever
         # exercises the pass path. This mutates copies and asserts that real

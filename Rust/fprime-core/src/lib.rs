@@ -7,6 +7,7 @@
 //! test in `Rust/test/ut/` which runs both codecs over the same values.
 #![cfg_attr(not(test), no_std)]
 
+pub mod strings;
 pub mod time;
 
 pub use fprime_config::{
