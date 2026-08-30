@@ -9,6 +9,24 @@ description = "extern \"C\" surface of the F Prime Rust crates, built as libfpri
 name = "fprime_rust"
 crate-type = ["staticlib", "rlib"]
 
+# `cargo test` cannot build this crate without a feature, and the feature is
+# deliberately awkward to ship.
+#
+# Cargo forces `panic = "unwind"` for the whole test profile -- the harness has
+# to catch a failing assertion -- and a `no_std` crate cannot be built that
+# way. `cfg(test)` does not help: it is set only on the test harness target,
+# not on the lib target that `cargo test` builds alongside it. So the only
+# route to testing the ~2000 lines of unsafe pointer work in here is a feature
+# that drops `no_std`.
+#
+# That is a feature which, if it ever reached a flight build, would silently
+# change the panic strategy of flight software. It is named for what it is,
+# it is not a default, and src/lib.rs refuses to compile with it enabled in a
+# release build. Enable it only as `cargo test -p fprime-ffi --features
+# test-std`.
+[features]
+test-std = []
+
 [dependencies]
 fprime-config = { path = "../fprime-config" }
 fprime-core = { path = "../fprime-core" }

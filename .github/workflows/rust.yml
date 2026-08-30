@@ -91,9 +91,40 @@ jobs:
       - name: Clippy (workspace)
         run: cargo clippy --workspace --exclude fprime-ffi --all-targets -- -D warnings
       - name: Clippy (ffi staticlib)
+        # --lib, not --all-targets: the shipped target is a no_std staticlib
+        # and this is the configuration that actually flies.
         run: cargo clippy -p fprime-ffi --lib -- -D warnings
+      - name: Clippy (ffi tests)
+        run: cargo clippy -p fprime-ffi --all-targets --features test-std -- -D warnings
       - name: Test
         run: cargo test --workspace --exclude fprime-ffi
+      - name: Test (ffi boundary contracts)
+        # fprime-ffi needs test-std to build a test harness at all: cargo forces
+        # panic="unwind" for the test profile and a no_std crate cannot be built
+        # that way. See Rust/fprime-ffi/Cargo.toml.
+        run: cargo test -p fprime-ffi --features test-std
+      - name: The no_std guard still refuses a release build
+        # test-std drops no_std, so it must never reach a flight build. The
+        # crate refuses that combination; if the guard ever stopped firing,
+        # nothing else would notice.
+        run: |
+          set +e
+          out="$(cargo build --release -p fprime-ffi --features test-std 2>&1)"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "test-std was accepted in a release build; the guard in src/lib.rs is not firing" >&2
+            exit 1
+          fi
+          # A nonzero exit alone proves nothing -- any unrelated build break
+          # would produce one and the canary would pass while the guard was
+          # gone. Require the guard's own message.
+          if ! printf '%s' "$out" | grep -q "must never be enabled in a release build"; then
+            echo "the build failed, but not on the no_std guard; the canary proves nothing:" >&2
+            printf '%s\n' "$out" >&2
+            exit 1
+          fi
+          echo "refused by the guard, as intended"
       - name: Build staticlib (release, panic=abort)
         run: cargo build --release
       - name: Cargo-only binary links no C++

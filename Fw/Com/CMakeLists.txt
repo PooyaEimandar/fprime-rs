@@ -14,3 +14,12 @@ register_fprime_module(
     "${CMAKE_CURRENT_LIST_DIR}/ComBuffer.hpp"
     "${CMAKE_CURRENT_LIST_DIR}/ComPacket.hpp"
 )
+
+### UTs ###
+register_fprime_ut(
+  SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/test/ut/ComPacketTest.cpp"
+  DEPENDS
+    Fw_Com
+    Fw_Types
+)

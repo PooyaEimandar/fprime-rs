@@ -590,6 +590,104 @@ Phases 1–9 verifiable and Phase 10 not.
       `string_copy` now takes measured content; the scan lives once, in the
       FFI, where the raw pointer is.
 
+      **The rest of the phase was audited, and the plan changed.** Thirteen
+      agents surveyed and adversarially audited the four remaining candidates
+      — `Fw::Buffer`, `PolyType`, `StringBase`, and the Com/Cmd/Tlm/Log packet
+      types — across 52 hazards. The conclusion, which holds up on inspection:
+      **none of them is a good next slice, and the reason is Phase 8.** All
+      four are descriptor/delegation classes whose substantive bodies are
+      virtual calls on `Fw::SerialBufferBase`, and `SerializableRust.cpp`
+      already backs those primitives in Rust *from underneath*. Porting the
+      delegation layer above them adds boundary surface and moves no
+      decisions. That is a general result: it will keep being true of any
+      descriptor class, so the phase's original framing — these four "as
+      canonical Rust" — is largely obsolete rather than merely unfinished.
+
+      What the audit did surface is an oracle problem worth fixing on its own
+      terms, and `Fw::Buffer`'s is the sharpest. `Fw::Buffer::SERIALIZED_SIZE`
+      is load-bearing outside its module — `Svc/ComQueue/ComQueueRust.cpp:124`
+      sizes queue entries from it — and the wire order (`data, size, context,
+      offset, capacity`, which is *not* the declaration order) was pinned by
+      nothing but a round trip through the same pair of functions, which
+      cannot fail when both change together. Separately, no assertion anywhere
+      in `Fw/Buffer`'s suite compared two buffers as *unequal*, so a
+      constant-true `operator==` passed all of it. Three tests now close both
+      gaps, and mutation testing confirms they discriminate: a consistent
+      wire-order swap is caught by the new `WireFormat` test and by nothing
+      else, and `Equality` catches both a constant-true operator and — more
+      to the point — one written to `Buffer.hpp`'s doc comment, which claims
+      equality is data, size and context when the implementation also compares
+      offset and capacity. That divergence is now pinned to the
+      implementation, since that is what callers actually get.
+
+      Four defects in the C++ came out of the audit, and all four are now
+      addressed. Each is upstream framework code rather than port code, so
+      each was scoped to the smallest correct change:
+
+      All four were then put through a 19-agent adversarial review, which
+      raised 14 findings and refuted 5 of its own. Seven of the nine survivors
+      were worth acting on, and two of those changed the shape of the fix:
+      the `ComPacket` guard now returns `TYPE_MISMATCH` rather than
+      `FORMAT_ERROR`, and the `TlmPacket` boundary tests no longer depend on
+      the configuration landing favourably. Both are described below. The
+      review's most useful single observation was that the first draft of the
+      invalid-descriptor test scanned only the top of the range, so narrowing
+      the guard to `serVal > 0x0FFF` would have survived it — re-admitting
+      exactly the in-range non-enumerator values a real uplink is most likely
+      to carry.
+
+      * **`Fw::ComPacket::deserializeBase` cast an uplinked descriptor with no
+        validity check** — the only one of the four that is undefined
+        behaviour rather than a wrong answer. `ComPacketType` is
+        `ComCfg::Apid::T`, a plain enum whose largest enumerator is `0x800`,
+        giving it a value range of `[0, 0xFFF]`; `FwPacketDescriptorType` is
+        a `U16`, so a descriptor above `0xFFF` — attacker-controlled on an
+        uplink — was cast outside the enum's range. The generated enum class
+        supplies exactly the check needed and its own constructors already
+        assert on it; storing the raw `T` is what bypassed that. It now
+        returns `FW_DESERIALIZE_TYPE_MISMATCH` — deliberately, and not
+        `FORMAT_ERROR` as first written. Every derived packet that checks its
+        own descriptor already answers `TYPE_MISMATCH` for one it does not
+        recognise, and `Svc/CmdDispatcher` telemeters that status verbatim as
+        `MalformedCommand`'s only argument, which is ground software's sole
+        discriminator for why a command was refused. Matching it keeps this a
+        pure removal of undefined behaviour rather than a change anyone can
+        observe. The one packet whose behaviour does move is `LogPacket`,
+        which has no descriptor check of its own and so used to accept an
+        unrecognised one outright.
+
+        **`Fw/Com` had no test directory at all**, so it has one now: four
+        cases covering the default, a round trip of every valid descriptor,
+        and a rejection of every invalid one. Both scans are derived from the
+        generated `isValid()` and sweep the whole 16-bit space rather than
+        sampling — `config/ComCfg.fpp` is a default a deployment replaces, so
+        a hardcoded list would test this repository's configuration instead of
+        the code, and a sample from one end would leave the guard's predicate
+        unpinned.
+      * **`Fw::TlmPacket::addValue`'s `>` boundary was untested.** The audit
+        corrected its own survey here: `TlmPacketSerializeFill` does not pin
+        it, because fixed-size entries leave a remainder that only lands on
+        `needed == left` when the entry stride happens to divide the space.
+        Two tests now drive the packet to an exact amount of free space and
+        add a value sized onto the boundary. The first draft of them filled
+        the packet and hoped the remainder landed right, which the review
+        showed would silently `GTEST_SKIP` for about three quarters of
+        plausible deployment configurations — a test that reports success
+        while testing nothing. They now hold for any configuration, with no
+        skip path at all. Changing `>` to `>=` fails the exact-fill test and
+        nothing else.
+      * **`Buffer.hpp`'s `operator==` doc comment contradicted the
+        implementation**, claiming equality is data, size and context when
+        the code also compares offset and capacity. The comment was wrong,
+        not the code, so the comment is fixed and the behaviour is pinned.
+      * **`advance`'s third guard is not a tautology after all.** It looks
+        like one — `offset + size` is exactly invariant under the two
+        statements above it — but that only means it cannot fire on a
+        well-formed buffer. It *can* fire on one whose invariant was already
+        broken, and `deserializeFrom` assigns all four fields straight from
+        the wire without relating them, so that state is reachable. It stays,
+        with a comment saying what it is actually for.
+
       **What this is not.** The phase's goal — `Fw::Buffer`, the string types,
       `PolyType`, and the Com/Cmd/Tlm/Log packet types as canonical Rust — is
       still early. `Fw::Time` (273 lines) and `Fw::StringUtils` (137) are 410

@@ -54,6 +54,74 @@ TEST(FwTlmTest, TlmPacketDeserializeOversizeRejected) {
     ASSERT_EQ(Fw::FW_DESERIALIZE_SIZE_MISMATCH, bigBuff.deserializeTo(pktOut));
 }
 
+// TlmPacket::addValue admits a value when `needed > left` is false, so a value
+// that exactly fills the packet is accepted. TlmPacketSerializeFill does not
+// distinguish `>` from `>=`: its entries are a fixed size, so it stops with a
+// leftover equal to (capacity - descriptor) mod entry-size, and the boundary
+// case arises only when that happens to be zero. With this repository's
+// defaults it is 16 against a 19-byte stride, so it never arises.
+//
+// Rather than fill and hope the remainder lands on the boundary -- which
+// depends on FW_COM_BUFFER_MAX_SIZE, FwChanIdType and Time::SERIALIZED_SIZE,
+// all of which a deployment retunes -- these drive the packet to an exact
+// amount of free space directly. That holds for any configuration, so neither
+// test can quietly become vacuous.
+namespace {
+
+// Leave the packet with exactly `left` bytes free.
+void setRemaining(Fw::TlmPacket& packet, FwSizeType left) {
+    Fw::ComBuffer com;
+    ASSERT_LE(left, com.getCapacity());
+    // The descriptor first, so the buffer still looks like a telemetry packet;
+    // addValue does not inspect it, but a nonsense packet would be a poor
+    // thing to leave behind for whoever reads this next.
+    ASSERT_EQ(Fw::FW_SERIALIZE_OK,
+              com.serializeFrom(static_cast<FwPacketDescriptorType>(Fw::ComPacketType::FW_PACKET_TELEM)));
+    for (FwSizeType i = com.getSize(); i < com.getCapacity() - left; i++) {
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK, com.serializeFrom(static_cast<U8>(i)));
+    }
+    packet.setBuffer(com);
+    ASSERT_EQ(packet.getBuffer().getCapacity() - packet.getBuffer().getSize(), left);
+}
+
+// A value buffer holding exactly `bytes` bytes of content.
+Fw::TlmBuffer valueOfSize(FwSizeType bytes) {
+    Fw::TlmBuffer buffer;
+    EXPECT_LE(bytes, buffer.getCapacity());
+    for (FwSizeType i = 0; i < bytes; i++) {
+        EXPECT_EQ(Fw::FW_SERIALIZE_OK, buffer.serializeFrom(static_cast<U8>(i)));
+    }
+    return buffer;
+}
+
+const FwSizeType ENTRY_OVERHEAD = sizeof(FwChanIdType) + Fw::Time::SERIALIZED_SIZE;
+const FwSizeType VALUE_BYTES = 4;
+
+}  // namespace
+
+TEST(FwTlmTest, TlmPacketAddValueExactFillIsAccepted) {
+    Fw::TlmPacket pktIn;
+    // needed == left exactly. `>` accepts this; `>=` would not.
+    setRemaining(pktIn, ENTRY_OVERHEAD + VALUE_BYTES);
+    Fw::TlmBuffer exact = valueOfSize(VALUE_BYTES);
+    Fw::Time timeIn(TimeBase::TB_WORKSTATION_TIME, 3, 4);
+
+    ASSERT_EQ(Fw::FW_SERIALIZE_OK, pktIn.addValue(9, timeIn, exact));
+    ASSERT_EQ(pktIn.getBuffer().getSize(), pktIn.getBuffer().getCapacity()) << "the packet is now exactly full";
+}
+
+TEST(FwTlmTest, TlmPacketAddValueOneByteOverIsRejected) {
+    Fw::TlmPacket pktIn;
+    // needed == left + 1: the first size that must be refused.
+    setRemaining(pktIn, ENTRY_OVERHEAD + VALUE_BYTES);
+    const FwSizeType before = pktIn.getBuffer().getSize();
+    Fw::TlmBuffer oversize = valueOfSize(VALUE_BYTES + 1);
+    Fw::Time timeIn(TimeBase::TB_WORKSTATION_TIME, 3, 4);
+
+    ASSERT_EQ(Fw::FW_SERIALIZE_NO_ROOM_LEFT, pktIn.addValue(9, timeIn, oversize));
+    ASSERT_EQ(pktIn.getBuffer().getSize(), before) << "a refused value must not partially serialize";
+}
+
 TEST(FwTlmTest, TlmPacketSerializeFill) {
     // compute a single entry size assuming for the test that the value of the telemetry channel
     // is a U32

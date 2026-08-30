@@ -117,6 +117,11 @@ void Buffer::advance(const FwSignedSizeType amount) {
     this->m_offset = static_cast<FwSizeType>(static_cast<FwSignedSizeType>(this->m_offset) + amount);
     // Keep the end of the represented data fixed
     this->m_size = static_cast<FwSizeType>(static_cast<FwSignedSizeType>(this->m_size) - amount);
+    // Not a check on this operation: offset + size is exactly invariant under
+    // the two statements above, so this can only fire on a buffer whose
+    // invariant was already broken when it arrived. That is reachable --
+    // deserializeFrom assigns all four fields straight from the wire without
+    // relating them -- which is what makes this worth keeping.
     FW_ASSERT(this->m_offset + this->m_size <= this->m_capacity, static_cast<FwAssertArgType>(this->m_offset),
               static_cast<FwAssertArgType>(this->m_size), static_cast<FwAssertArgType>(this->m_capacity));
     this->m_serialize_repr.setExtBuffer(this->m_bufferData + this->m_offset, this->m_size);

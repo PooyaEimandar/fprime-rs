@@ -9,18 +9,38 @@
 //! - all storage is caller-provided; this crate allocates nothing
 //! - a null pointer is accepted wherever the paired length/capacity is zero,
 //!   matching the `Fw::LinearBufferBase` contract
-#![no_std]
+//!
+//! `no_std` unless the `test-std` feature is on, which only `cargo test` sets
+//! -- see the note in Cargo.toml for why testing this crate needs it at all.
+//! Every shipped build is `no_std` and `panic = "abort"`.
+#![cfg_attr(not(feature = "test-std"), no_std)]
+
+// A feature that drops `no_std` must not reach a flight build. Release is what
+// Rust/enable.cmake builds, so refusing that combination makes the mistake a
+// compile error rather than a silent change of panic strategy.
+//
+// The condition is `debug_assertions`, which is a codegen flag rather than the
+// profile itself -- Rust has no cfg for "release". A profile that sets
+// `debug-assertions = true` alongside `opt-level = 3` would slip past this,
+// and nothing here can see that. What it does catch is the realistic mistake:
+// the stock release profile, which is what the CMake build uses. Treat it as
+// a tripwire on the likely path, not a proof.
+#[cfg(all(feature = "test-std", not(debug_assertions)))]
+compile_error!(
+    "the `test-std` feature drops no_std and must never be enabled in a release build; \
+     it exists so `cargo test -p fprime-ffi --features test-std` can link the test harness"
+);
 
 use fprime_core::{status_code, DeserReader, Endianness, LengthMode, SerBuffer};
 
-#[cfg(not(test))]
+#[cfg(not(feature = "test-std"))]
 extern "C" {
     /// Provided by the C++ side (Rust/RustPanicHook.cpp): routes a Rust panic
     /// into the FW_ASSERT fault path. Must not return; if it does, we halt.
     fn fprime_rs_panic_hook(file: *const u8, file_len: usize, line: core::ffi::c_uint);
 }
 
-#[cfg(not(test))]
+#[cfg(not(feature = "test-std"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     let (file, len, line) = match info.location() {
@@ -1968,5 +1988,193 @@ pub unsafe extern "C" fn fprime_rs_substring_find_last(
     match strings::rfind(source, sub) {
         Some(at) => at as FwSignedSizeType,
         None => -1,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boundary tests
+// ---------------------------------------------------------------------------
+//
+// Deliberately narrow. The C++ unit suites already exercise every entry point
+// here through its real callers, and Rust/test/differential compares
+// Fw::StringUtils against the C++ original exhaustively -- both stronger
+// oracles than anything hand-written here could be.
+//
+// What neither of those can reach is the degenerate pointer cases, because the
+// C++ shims assert on them before Rust is ever called: a null pointer, a zero
+// length, an unterminated string. Those contracts are stated in the `# Safety`
+// docs above and are otherwise checked by nothing. That is what this covers.
+//
+// Requires `--features test-std`; see Cargo.toml for why.
+#[cfg(test)]
+// These pass raw `*const u8` across a C ABI, so the buffers are byte arrays
+// with an explicit terminator rather than `CStr`s; `c"..."` would yield
+// `*const c_char` and put a cast at every call site.
+#[allow(clippy::manual_c_str_literals)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_null_pointer_with_zero_length_is_an_empty_slice() {
+        // C++ callers legitimately pass (nullptr, 0) for an empty buffer, and
+        // `from_raw_parts` on null is UB even at length zero. Nothing in the
+        // C++ suites distinguishes this from a lucky no-op.
+        // SAFETY: length zero, which is exactly the case under test.
+        let empty = unsafe { view(core::ptr::null(), 0) };
+        // SAFETY: as above.
+        let empty_mut = unsafe { view_mut(core::ptr::null_mut(), 0) };
+        assert!(empty.is_empty());
+        assert!(empty_mut.is_empty());
+    }
+
+    #[test]
+    fn c_str_len_stops_at_the_terminator_and_at_the_bound() {
+        // SAFETY: the buffer outlives the call and holds a terminator.
+        let found = unsafe { c_str_len(b"abc\0".as_ptr(), 8) };
+        // SAFETY: as above; the terminator is the first byte.
+        let leading = unsafe { c_str_len(b"\0ab".as_ptr(), 3) };
+        // SAFETY: four readable bytes, bound of four.
+        let unterminated = unsafe { c_str_len(b"abcd".as_ptr(), 4) };
+        // SAFETY: a bound of zero reads nothing at all, which is what makes it
+        // safe to pass a pointer that may not be readable.
+        let unread = unsafe { c_str_len(b"abc\0".as_ptr(), 0) };
+
+        assert_eq!(found, Some(3));
+        assert_eq!(leading, Some(0));
+        // Unterminated within the bound is None, not the bound: the callers
+        // decide what that means and they do not agree -- string_length
+        // reports the bound, path resolution reports a malformed path.
+        assert_eq!(unterminated, None);
+        assert_eq!(unread, None);
+    }
+
+    #[test]
+    fn c_str_borrows_through_the_terminator() {
+        // SAFETY: terminated within the bound.
+        let borrowed = unsafe { c_str(b"ab\0".as_ptr(), 8) };
+        // SAFETY: null is the case under test.
+        let null = unsafe { c_str(core::ptr::null(), 8) };
+        // SAFETY: three readable bytes, bound of three, no terminator.
+        let unterminated = unsafe { c_str(b"abc".as_ptr(), 3) };
+
+        assert_eq!(borrowed, Some(&b"ab\0"[..]), "the terminator is included");
+        assert_eq!(null, None);
+        assert_eq!(unterminated, None);
+    }
+
+    #[test]
+    fn string_length_reports_the_bound_when_unterminated() {
+        // SAFETY: six readable bytes, bound of six.
+        let unterminated = unsafe { fprime_rs_string_length(b"abcdef".as_ptr(), 6) };
+        // SAFETY: terminated well within the bound.
+        let terminated = unsafe { fprime_rs_string_length(b"abc\0def".as_ptr(), 7) };
+        // SAFETY: no read occurs at a bound of zero.
+        let unread = unsafe { fprime_rs_string_length(b"abc\0".as_ptr(), 0) };
+
+        // The distinction the C++ documents: a result equal to the bound means
+        // "no terminator found", not "exactly this long".
+        assert_eq!(unterminated, 6);
+        assert_eq!(terminated, 3);
+        assert_eq!(unread, 0);
+    }
+
+    #[test]
+    fn last_n_offset_never_walks_off_the_front() {
+        // SAFETY: terminated within the bound.
+        let tail = unsafe { fprime_rs_string_last_n_offset(b"abcdef\0".as_ptr(), 2, 7) };
+        // SAFETY: as above; n exceeds the string's length.
+        let whole = unsafe { fprime_rs_string_last_n_offset(b"ab\0".as_ptr(), 9, 3) };
+
+        assert_eq!(tail, 4);
+        assert_eq!(whole, 0, "shorter than n keeps the whole string");
+    }
+
+    #[test]
+    fn a_zero_length_copy_touches_nothing() {
+        // The C++ returns `destination` untouched for num == 0, before it
+        // asserts either pointer is non-null. The shim keeps that early
+        // return, so Rust is only reached with num > 0 -- but the contract is
+        // stated in this function's docs, so it is checked here.
+        let mut dst = [b'Z'; 4];
+        // SAFETY: the source is terminated and the destination is writable.
+        let written = unsafe { fprime_rs_string_copy(dst.as_mut_ptr(), b"abc\0".as_ptr(), 0) };
+
+        assert_eq!(written, 0);
+        assert_eq!(&dst, b"ZZZZ");
+    }
+
+    #[test]
+    fn searches_accept_a_null_pointer_at_zero_size() {
+        // `view` is what makes this safe, and the zero-size substring rule is
+        // the asymmetry pinned in fprime-core: forward matches at 0, reverse
+        // does not match at all in an empty source.
+        // SAFETY: both pointers are null with a matching size of zero.
+        let forward =
+            unsafe { fprime_rs_substring_find(core::ptr::null(), 0, core::ptr::null(), 0) };
+        // SAFETY: as above.
+        let reverse =
+            unsafe { fprime_rs_substring_find_last(core::ptr::null(), 0, core::ptr::null(), 0) };
+
+        assert_eq!((forward, reverse), (0, -1));
+    }
+
+    #[test]
+    fn path_resolution_rejects_a_null_or_unterminated_path() {
+        let mut out = [0u8; 64];
+        // SAFETY: the output buffer is writable for its full length.
+        let null_path = unsafe {
+            fprime_rs_path_resolve(
+                core::ptr::null(),
+                core::ptr::null(),
+                out.as_mut_ptr(),
+                64,
+                64,
+            )
+        };
+        // SAFETY: three readable bytes with a matching bound, and as above.
+        let unterminated = unsafe {
+            fprime_rs_path_resolve(b"abc".as_ptr(), core::ptr::null(), out.as_mut_ptr(), 64, 3)
+        };
+
+        // A null path is a malformed path, not a crash: the C++ reports the
+        // same status rather than asserting. An unterminated one is reported
+        // the same way rather than scanned past.
+        assert_eq!(null_path, path::Status::InvalidPath.code());
+        assert_eq!(unterminated, path::Status::InvalidPath.code());
+    }
+
+    #[test]
+    fn a_refused_time_operation_leaves_its_output_alone() {
+        // The shim turns `false` into the FW_ASSERT the original performed, so
+        // it never reads `out` on failure -- but leaving a half-written time
+        // behind would be a trap for any future caller that does.
+        let a = RsTime {
+            time_base: 0,
+            context: 0,
+            seconds: 1,
+            useconds: 0,
+        };
+        let other_base = RsTime {
+            time_base: 1,
+            context: 0,
+            seconds: 1,
+            useconds: 0,
+        };
+        let untouched = RsTime {
+            time_base: 9,
+            context: 9,
+            seconds: 9,
+            useconds: 9,
+        };
+        let mut out = untouched;
+
+        // SAFETY: all three pointers are to live, initialised values.
+        let refused = unsafe { fprime_rs_time_add(&a, &other_base, &mut out) };
+        assert!(!refused, "mismatched time bases are refused");
+        assert_eq!(out, untouched);
+
+        // SAFETY: as above.
+        let accepted = unsafe { fprime_rs_time_sub(&a, &a, &mut out) };
+        assert!(accepted, "equal times subtract to zero");
     }
 }

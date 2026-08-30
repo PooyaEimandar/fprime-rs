@@ -96,9 +96,12 @@ class Buffer : public Fw::Serializable {
 
     //! Equality operator returning true when buffers are equivalent
     //!
-    //! Buffers are deemed equivalent if they contain a pointer to the same data, with the same size, and the same
-    //! context. The representation of that buffer for use with serialization and deserialization need not be
-    //! equivalent.
+    //! Buffers are deemed equivalent when every member describing the data matches: the pointer to the original
+    //! allocation, the offset within it, the size, the capacity, and the context. The representation of that buffer
+    //! for use with serialization and deserialization need not be equivalent.
+    //!
+    //! Note that offset and capacity are part of this, so two buffers over the same bytes of the same allocation
+    //! still compare unequal when one reached them by advancing and the other by shrinking.
     //! \param src: buffer to test against
     //! \return: true if equivalent, false otherwise
     bool operator==(const Buffer& src) const;
