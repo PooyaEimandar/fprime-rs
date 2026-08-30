@@ -114,34 +114,71 @@ mixed C++/Rust deployments working at every step.
       reimplemented logic that C++ called into at the edges; here C++'s own
       `Fw::LinearBufferBase` — the primitive read/write path underneath every
       component, every autocoded type and every packet on the wire — calls
-      into Rust for all eleven primitive scalar operations (`U8`/`U16`/`U32`/
-      `U64`/`bool` × serialize/deserialize, plus `deserializeTo(I8&)`, the one
-      signed overload upstream does not delegate to its unsigned sibling).
-      The remaining signed and floating-point overloads delegate to those, so
-      **every primitive scalar serialization in the framework goes through
-      Rust**. `Rust/fprime-core`'s `Cursor` owns the byte work; the C++ object
-      still owns its storage and its `m_serLoc`/`m_deserLoc` cursors and
-      passes them across. Reads borrow through a separate `Reader` that is
-      `const` and spans only `min(m_serLoc, m_capacity)` bytes — a
-      deserialize cannot touch a byte past the write high-water mark, so it
-      must not borrow one either.
+      into Rust for **every byte it moves between a caller and its storage**:
+      the eleven primitive scalar operations (`U8`/`U16`/`U32`/`U64`/`bool` ×
+      serialize/deserialize, plus `deserializeTo(I8&)`, the one signed
+      overload upstream does not delegate to its unsigned sibling), and the
+      six bulk paths that carry the payloads —
+      `serializeFrom(const U8*, …)`, `serializeFrom(const LinearBufferBase&)`,
+      `deserializeTo(U8*, …)`, `deserializeTo(LinearBufferBase&)`, `setBuff`
+      and `copyFrom`, with `copyRaw`/`copyRawOffset` covered transitively.
+      The only `memcpy` left in the file is the four float bit-casts, which
+      are type punning rather than buffer movement.
+
+      Four of the six bulk paths had **no** test in `Fw/Types/test/ut` at all,
+      so `Rust/test/ut/RustFwBulkTest.cpp` pins all six plus
+      `copyRaw`/`copyRawOffset` — 20 cases covering each status on each path,
+      the exact-fit and one-past boundaries, and what a refused transfer
+      leaves behind. It uses only the public `Fw` API, so it passes against
+      either implementation and CI runs it in both switch positions: a
+      differential oracle rather than a test of the Rust alone.
+
+      `Rust/fprime-core`'s `Cursor` owns the scalar work and
+      `plan_bulk_read`/`plan_bulk_write` the bulk bounds decisions — in safe,
+      unit-tested code, with checked arithmetic where the C++ expression can
+      wrap for a wire-supplied length. The C++ object still owns its storage
+      and its `m_serLoc`/`m_deserLoc` cursors and passes them across. Scalar
+      reads borrow through a `Reader` that is `const` and spans only
+      `min(m_serLoc, m_capacity)` bytes — a deserialize cannot touch a byte
+      past the write high-water mark, so it must not borrow one either. The
+      bulk paths build no slice at all, because the C++ contract permits the
+      source to overlap the destination; they take raw pointers and do one
+      memmove-semantics copy.
 
       `Fw/Types/SerializableRust.cpp` is *generated* from the upstream
       `Serializable.cpp` by `tools/fprime-rs/gen_fw_kernel.py`, not forked
       from it: it is an 800-line near-copy of a file upstream keeps changing,
-      and a hand-maintained duplicate would drift silently. The generator
-      replaces exactly those eleven bodies and nothing else (the full diff
-      against the original is 15 hunks: the eleven bodies — the `I8` one
-      splitting in two — plus the banner, the kernel include, and two
-      `static_assert`s pinning `Endianness::BIG == 0`/`LITTLE == 1`, which the
-      shim relies on by forwarding the raw enum value rather than re-encoding
-      it — so an out-of-range mode still faults instead of silently reading as
-      `LITTLE`). Output is emitted pre-wrapped to the repository's
-      clang-format style, so the format check and the drift check can both
-      pass. `--check` runs unconditionally in the Rust CI job, and again on
-      every build that enables the kernel; `Fw/Types/**` is in the workflow's
-      path filter, so an upstream edit that never reached the Rust kernel
-      trips it instead of quietly diverging.
+      and a hand-maintained duplicate would drift silently. It replaces
+      exactly those seventeen bodies and nothing else, plus the banner, the
+      kernel include, and two `static_assert`s pinning
+      `Endianness::BIG == 0`/`LITTLE == 1` — the shim forwards the raw enum
+      value rather than re-encoding it, so an out-of-range mode still faults
+      instead of being silently read as `LITTLE`.
+
+      The drift check is the point of generating it, so it is built to not be
+      defeatable by accident:
+
+      - it compares **content, not formatting** — whitespace, wrapping and
+        include order are normalized away — so the repository's format check
+        and this check can never contradict each other, a conflict an earlier
+        version of this generator did create;
+      - it fingerprints each upstream body the generator **replaces or
+        removes** into the generated file. Those regions are otherwise a
+        blind spot: the output does not contain them, so an upstream fix
+        inside one would leave the generated file identical and go unnoticed.
+        Removed bodies are the larger hole of the two — for the Phase 9 shims
+        they are precisely the helpers the Rust reimplements — and they were
+        genuinely unguarded until a review caught it. A changed fingerprint
+        says the C++ this Rust mirrors has moved and needs re-reviewing.
+
+      Because every `--check` in CI and in the build runs against a pristine
+      tree, it only ever exercises the *pass* path — which would make a check
+      that had silently stopped catching anything look healthy.
+      `tools/fprime-rs/test_shimgen.py` closes that: it mutates copies and
+      asserts the verdict for 14 cases across the three generators, including
+      a `..` that escapes the sandbox root and an inverted heap tie-break. It
+      runs in CI. `--check` itself runs unconditionally in the Rust job and
+      again on every build that enables a shim.
 
       **Off by default**, alone among the `FPRIME_RUST_IMPL_*` switches. This
       is the only one that taxes the whole framework rather than the module it
@@ -150,18 +187,15 @@ mixed C++/Rust deployments working at every step.
       **What this is not.** The phase's stated goal — "serialization, types,
       buffers become the canonical Rust crates … C++ `Fw` reduced to
       wrappers" — is **not** met, and Rust is not the type authority. What
-      moved is the primitive scalar kernel: 11 of the 90 `LinearBufferBase::`
-      definitions in the file call Rust; the other 79 are the original C++
-      verbatim. Everything else in `Fw` is untouched: `Fw::Buffer`, the string
-      types, `ComPacket`/`CmdPacket`/`TlmPacket`/`LogPacket`, the
-      `Serializable` class hierarchy (`Serializable.hpp` is unmodified), and
-      all bulk byte movement — `serializeFrom(const U8*, …)`,
-      `deserializeTo(U8*, …)`, `setBuff`, `copyRaw`/`copyRawOffset`,
-      `copyFrom` — which stays C++ `memcpy` and carries the majority of the
-      actual bytes for strings, `Fw::Buffer` payloads and DP containers. C++
-      still defines the classes, owns the storage and drives the calls; Rust
-      is a callee inside them. That is a real reversal of direction, but not a
-      re-hosting.
+      moved is one class's byte handling: 17 of the 90 `LinearBufferBase::`
+      definitions call Rust; the other 73 are the original C++ verbatim, and
+      they are the arithmetic, the cursor bookkeeping and the class plumbing.
+      Everything else in `Fw` is untouched: `Fw::Buffer`, the string types,
+      `ComPacket`/`CmdPacket`/`TlmPacket`/`LogPacket`, and the `Serializable`
+      class hierarchy (`Serializable.hpp` is unmodified). C++ still defines
+      the classes, owns the storage and drives the calls; Rust is a callee
+      inside them. That is a real reversal of direction, and now a complete
+      one for byte movement, but it is not a re-hosting.
 
       **Cost**, measured, not estimated (`-O2`, arm64, identical bytes out of
       both implementations):
@@ -204,8 +238,69 @@ mixed C++/Rust deployments working at every step.
       job) and every external project consuming F´ via `find_package` silently
       build the original C++ kernel, so the exit criterion is unverified
       outside framework-root builds on a machine with cargo
-- [ ] **Phase 9 — OSAL in Rust + component long tail**: port what deployments
-      actually instantiate
+- [~] **Phase 9 — partial: `Os/Generic` and path safety in Rust.** Two OSAL
+      pieces move, chosen because they are algorithm rather than syscall:
+
+      - **`Types::MaxHeap`** (`Os/Generic/Types/`, 260 → 121 lines) — the
+        stable max heap that orders *every* message queued to an active
+        component, through `Os::Generic::PriorityQueue` (the platform default
+        queue on Linux and Darwin) and `PriorityMemQueue`. Rust owns push,
+        pop and heapify, including the age tie-break that makes equal
+        priorities FIFO — the property a naive heap silently loses. The node
+        array is allocated by C++ and indexed by both languages, so the shim
+        asserts size, alignment and every field offset against the layout Rust
+        reports, once per heap creation: a disagreement would corrupt a queue
+        rather than fail.
+      - **`Os::FilePathUtils`** (213 → 85 lines) — resolution and containment:
+        the code deciding whether a path the spacecraft was *told* to open
+        stays inside the directory it is allowed to touch. Pure character
+        arithmetic, no filesystem access. `resolveFromCwd` stays C++ because
+        its substance is a `getWorkingDirectory` syscall.
+
+      Both are generated by the same mechanism as Phase 8's kernel
+      (`tools/fprime-rs/shimgen.py`, now shared by three generators), with the
+      same content-not-formatting drift check and upstream-body fingerprints —
+      including for the helper functions each generator *removes*, which for
+      these two shims are the very functions the Rust reimplements.
+      Their oracles are the existing suites: `Types_Max_Heap_test` (rules-based
+      via STest), `Os_FilePathUtils_Test` (24 cases), `Os_SandboxedFile_Test`,
+      and the three priority-queue suites that run on top of the heap.
+
+      **What was deliberately not ported, and why.** Everything in
+      `Os/Posix`, `Os/Darwin` and `Os/Linux` is a thin libc/pthread wrapper —
+      `Os/Posix/Mutex.cpp` is 51 lines of pthread, `Os/Darwin/Memory.cpp` is
+      one mach call. Routing those through Rust adds an FFI hop and the
+      archive tax and buys nothing: the syscall is still the syscall.
+      `AtomicQueue` and `LocklessPriorityQueue` are worse than pointless to
+      port — their correctness *is* memory ordering, Rust uses the same model,
+      and a port would blind the TSan suite that is currently the only thing
+      checking them. The meaty logic in `Os/File.cpp`, `FileSystem.cpp`,
+      `Directory.cpp` and `Task.cpp` is syscall-free but sits entirely on
+      `m_delegate` calls, so moving it means a large hot-path callback table
+      and generators for six more upstream files.
+
+      **The "component long tail" is not addressed, and the honest count is
+      zero.** There is one real deployment in-tree (`TestDeploymentsProject/Ref`).
+      Its topology instantiates 34 framework components; 3 are Rust-backed
+      (ComQueue, FrameAccumulator, FprimeRouter) — and the FprimeFramer and
+      FprimeDeframer switches from Phase 2 apply to *no* instantiated
+      component, because Ref uses the ComCcsds subtopology rather than
+      ComFprime. Running Phase 7's generator against the real models: it
+      refuses 30 of the 34 outright, and of the 4 it accepts, 3 cannot compile
+      because the autocoded base leaves command handlers pure-virtual. Exactly
+      one component in the whole deployment is reachable end to end today —
+      `Svc::FatalHandler`, whose entire body is four syscalls. The generator
+      also cannot reproduce Phases 2/3/5's own shipped work.
+
+      The blocker is not the primitives-only parameter rule; it is that the
+      generated glue is a **one-way sink**. Rust cannot call an output port,
+      emit an event or telemetry, read a parameter, or answer a command.
+      Ordered by how many components each unblocks, the generator needs:
+      output-port callbacks (a vtable of `extern "C"` thunks passed alongside
+      the instance pointer), then return values across the FFI (which alone
+      unblocks `Svc::ApidManager` — 156 lines of pure enum/integer table
+      lookup with 272 lines of tests, the best available proving ground), then
+      `ref` parameters for serializable types
 - [ ] **Phase 10 — Drop the C++ toolchain** (per deployment): no fpp-to-cpp, no
       C++ objects, cargo-only build
 

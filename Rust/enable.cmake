@@ -19,7 +19,9 @@ option(FPRIME_ENABLE_RUST "Build the fprime-rs Rust components" ON)
 
 # Per-module implementation switches: Rust implementation when ON (and Rust is
 # available), original C++ implementation when OFF. One-flag rollback per
-# module; CI can run the same UT suites in both positions.
+# module. CI builds the framework in the OFF position too, so the C++ files a
+# switch displaces stay compilable -- with a switch ON they are not in the
+# build at all, and an upstream change could break them unnoticed.
 option(FPRIME_RUST_IMPL_UTILS_TYPES "Use the Rust CircularBuffer engine" ON)
 option(FPRIME_RUST_IMPL_UTILS_HASH "Use the Rust CRC32 implementation" ON)
 option(FPRIME_RUST_IMPL_CFDP_CHECKSUM "Use the Rust CFDP checksum" ON)
@@ -40,6 +42,14 @@ option(FPRIME_RUST_IMPL_SVC_COM_QUEUE "Use the Rust ComQueue priority scheduling
 # every binary. Turn it on deliberately, per deployment, against a measured
 # budget -- see Rust/README.md, Phase 8.
 option(FPRIME_RUST_IMPL_FW_TYPES "Use the Rust-backed Fw serialization kernel" OFF)
+
+# Phase 9, the OSAL: the stable max heap that orders every message queued to
+# an active component. Unlike the Fw kernel above this is a bounded, per-queue
+# algorithm rather than a per-field tax, so it defaults ON like Phases 1-7.
+option(FPRIME_RUST_IMPL_OS_MAXHEAP "Use the Rust MaxHeap behind the OSAL priority queue" ON)
+# Phase 9: path resolution and sandbox containment -- the check that keeps a
+# commanded file path inside the directory a deployment allows.
+option(FPRIME_RUST_IMPL_OS_FILEPATH "Use the Rust path resolution and containment checks" ON)
 
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH

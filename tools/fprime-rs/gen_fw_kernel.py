@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
 """Generate Fw/Types/SerializableRust.cpp from Fw/Types/Serializable.cpp.
 
-fprime-rs Phase 8, the flip point: the Fw serialization kernel's eleven
-primitive scalar methods call into Rust instead of manipulating bytes in C++.
-Everything else in the file -- every other method, the class layout, the
-``#if`` structure -- is the original's, byte for byte.
-
-The Rust-backed file is a near-copy of an 800-line upstream file, so it is
-*generated*, never hand-edited: an upstream change to ``Serializable.cpp``
-otherwise silently fails to reach the Rust build, and the two implementations
-drift apart with nothing to catch it. ``--check`` (run unconditionally by the
-Rust CI job, and again by every build that sets ``FPRIME_RUST_IMPL_FW_TYPES``)
-fails loudly the moment they do.
+fprime-rs Phase 8, the flip point: the Fw serialization kernel's primitive
+scalar methods and its bulk byte paths call into Rust instead of manipulating
+bytes in C++. Everything else in the file -- every other method, the class
+layout, the ``#if`` structure -- is the original's.
 
   python3 tools/fprime-rs/gen_fw_kernel.py           # regenerate
   python3 tools/fprime-rs/gen_fw_kernel.py --check   # verify, exit 1 on drift
 
 The remaining signed and floating-point overloads are deliberately NOT
-replaced: they already delegate to the primitives below, so replacing these
-eleven routes every primitive SCALAR serialization through Rust. Bulk byte
-movement (serializeFrom(const U8*, ...), deserializeTo(U8*, ...), setBuff,
-copyRaw/copyRawOffset, copyFrom) stays C++ memcpy and is untouched.
+replaced: they already delegate to the primitives below. Together with the
+bulk paths, that puts every byte this class moves between a caller and its
+storage through Rust; the only memcpy left is the float bit-casts, which are
+type punning rather than buffer movement.
+
+See tools/fprime-rs/shimgen.py for the generation and drift-check mechanism.
 """
 
-import argparse
-import difflib
-import pathlib
 import sys
 
-REPO = pathlib.Path(__file__).resolve().parents[2]
+import shimgen
+from shimgen import REPO
+
 SOURCE = REPO / "Fw" / "Types" / "Serializable.cpp"
 TARGET = REPO / "Fw" / "Types" / "SerializableRust.cpp"
 
@@ -38,12 +32,14 @@ BANNER = """\
 //
 // Rust-backed implementation of the Fw serialization kernel (fprime-rs
 // Phase 8 -- the flip point). Every method, class and semantic is the
-// original's; what changed is that the primitive reads and writes call into
-// Rust (Rust/fprime-core/src/lib.rs Cursor) instead of manipulating bytes
-// here. The remaining signed and floating-point overloads are untouched
-// because they already delegate to these primitives, so every primitive
-// SCALAR serialization goes through Rust. Bulk byte movement (setBuff,
-// copyRaw, the pointer/length overloads) stays C++ memcpy.
+// original's; what changed is that the primitive reads and writes, and the
+// bulk byte transfers, call into Rust (Rust/fprime-core, Rust/fprime-ffi)
+// instead of manipulating bytes here. The remaining signed and floating-point
+// overloads are untouched because they already delegate to these primitives,
+// and copyRaw/copyRawOffset are covered transitively through the
+// destination's setBuff and serializeFrom. What is left in C++ is the four
+// memcpy-based float bit-casts, which are type punning rather than buffer
+// movement, and the arithmetic around the calls.
 //
 // Selected instead of Serializable.cpp via FPRIME_RUST_IMPL_FW_TYPES; the
 // oracle is the entire existing C++ test suite.
@@ -71,13 +67,14 @@ static_assert(static_cast<int32_t>(Fw::Endianness::LITTLE) == 1, "Rust kernel ex
 """
 
 STATE = "this->m_buffAddr, this->m_capacity, &this->m_serLoc, &this->m_deserLoc"
+# The read entry points take the cursors by value: they never move them.
+READ_STATE = "this->m_buffAddr, this->m_capacity, this->m_serLoc, this->m_deserLoc"
 
-# Bodies are emitted already wrapped the way clang-format would wrap them.
-# The generated file lives under Fw/, which the format-check workflow checks,
-# while `--check` below compares byte for byte -- so a body clang-format would
-# rewrap would make those two jobs mutually exclusive. The repository style is
-# Chromium at 120 columns: arguments bin-packed greedily, continuations
-# aligned under the open bracket.
+# Formatting is clang-format's job, not this generator's: `--check` below
+# compares content with whitespace collapsed, so a reformat of either file
+# cannot make the format check and the drift check contradict each other. The
+# emitted wrapping is only a starting point, tidied by clang-format when it is
+# available at generation time.
 COLUMN_LIMIT = 120
 
 
@@ -88,11 +85,7 @@ def _pack(prefix, args, suffix):
     current = prefix
     for i, arg in enumerate(args):
         piece = arg + ("," if i + 1 < len(args) else suffix)
-        candidate = (
-            current
-            + (" " if current != prefix and not current.endswith(" ") else "")
-            + piece
-        )
+        candidate = current + (" " if current != prefix else "") + piece
         if current == prefix:
             candidate = prefix + piece
         if len(candidate) <= COLUMN_LIMIT or current == prefix:
@@ -112,12 +105,7 @@ def _args(tail, mode):
 
 
 def _wrap(lead, fn, args, suffix):
-    """Wrap one call the way clang-format does.
-
-    It prefers breaking once after the outer open bracket when the whole
-    argument list then fits on a single continuation line, and otherwise
-    bin-packs the arguments aligned under the inner bracket.
-    """
+    """Wrap one call, breaking after the outer bracket when that fits."""
     oneline = f"        {fn}({', '.join(args)}{suffix}"
     if len(oneline) <= COLUMN_LIMIT:
         return f"{lead}\n{oneline}\n"
@@ -172,6 +160,153 @@ REPLACEMENTS = [
     ),
 ]
 
+# --- Bulk transfers -------------------------------------------------------
+#
+# The payload paths. Only the byte movement and the cursor update move to
+# Rust; the surrounding logic stays C++ because it calls back into other C++
+# objects (getSize/getCapacity/getBuffAddr/setBuffLen) and because the exact
+# order of the original's room check and its null assert is observable -- a
+# too-long transfer from a null source returns NO_ROOM_LEFT rather than
+# faulting, so that check is left where it was. Rust re-checks anyway, with
+# checked arithmetic, since it owns the copy.
+
+BULK_REPLACEMENTS = [
+    (
+        """SerializeStatus LinearBufferBase::serializeFrom(const U8* buff,
+                                FwSizeType length,
+                                Serialization::t lengthMode,
+                                Endianness endianMode)""",
+        """    if (lengthMode == Serialization::INCLUDE_LENGTH) {
+        const SerializeStatus stat = this->serializeFrom(static_cast<FwSizeStoreType>(length), endianMode);
+        if (stat != FW_SERIALIZE_OK) {
+            return stat;
+        }
+    }
+    if (this->m_serLoc + length > this->m_capacity) {
+        return FW_SERIALIZE_NO_ROOM_LEFT;
+    }
+    if (length > 0) {
+        FW_ASSERT(buff != nullptr);
+    }
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    return static_cast<SerializeStatus>(fprime_rs_lbb_ser_bytes(STATE, buff, length));
+""",
+    ),
+    (
+        "SerializeStatus LinearBufferBase::serializeFrom(const LinearBufferBase& val, Endianness mode)",
+        """    const Serializable::SizeType size = val.getSize();
+    if (this->m_serLoc + size + static_cast<Serializable::SizeType>(sizeof(FwSizeStoreType)) > this->m_capacity) {
+        return FW_SERIALIZE_NO_ROOM_LEFT;
+    }
+    const SerializeStatus stat = this->serializeFrom(static_cast<FwSizeStoreType>(size), mode);
+    if (stat != FW_SERIALIZE_OK) {
+        return stat;
+    }
+    const U8* valBuffAddr = val.getBuffAddr();
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    FW_ASSERT(valBuffAddr != nullptr);
+    return static_cast<SerializeStatus>(fprime_rs_lbb_ser_bytes(STATE, valBuffAddr, size));
+""",
+    ),
+    (
+        """SerializeStatus LinearBufferBase::deserializeTo(U8* buff,
+                                Serializable::SizeType& length,
+                                Serialization::t lengthMode,
+                                Endianness endianMode)""",
+        """    FW_ASSERT(this->m_buffAddr != nullptr);
+    FwSizeType transfer = static_cast<FwSizeType>(length);
+    if (lengthMode == Serialization::INCLUDE_LENGTH) {
+        FwSizeStoreType storedLength = 0;
+        const SerializeStatus stat = this->deserializeTo(storedLength, endianMode);
+        if (stat != FW_SERIALIZE_OK) {
+            return stat;
+        }
+        // Both halves of the original's check stay here, and stay ahead of
+        // the assert below: a length that overruns the buffer is a status,
+        // not a fault, and splitting the test across the language boundary
+        // would let the assert win.
+        if ((storedLength > this->getDeserializeSizeLeft()) || (storedLength > length)) {
+            return FW_DESERIALIZE_SIZE_MISMATCH;
+        }
+        transfer = static_cast<FwSizeType>(storedLength);
+    } else if (transfer > this->getDeserializeSizeLeft()) {
+        return FW_DESERIALIZE_SIZE_MISMATCH;
+    }
+    if (transfer > 0) {
+        FW_ASSERT(buff != nullptr);
+    }
+    const SerializeStatus status =
+        static_cast<SerializeStatus>(fprime_rs_lbb_read_bytes(READ_STATE, buff, transfer));
+    if (status != FW_SERIALIZE_OK) {
+        return status;
+    }
+    length = static_cast<Serializable::SizeType>(transfer);
+    this->m_deserLoc += static_cast<Serializable::SizeType>(transfer);
+    return FW_SERIALIZE_OK;
+""",
+    ),
+    (
+        "SerializeStatus LinearBufferBase::deserializeTo(LinearBufferBase& val, Endianness mode)",
+        """    U8* valBuffAddr = val.getBuffAddr();
+    FW_ASSERT(valBuffAddr != nullptr);
+    FwSizeStoreType storedLength = 0;
+    SerializeStatus stat = this->deserializeTo(storedLength, mode);
+    if (stat != FW_SERIALIZE_OK) {
+        return stat;
+    }
+    if ((storedLength > val.getCapacity()) || (storedLength > this->getDeserializeSizeLeft())) {
+        return FW_DESERIALIZE_SIZE_MISMATCH;
+    }
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    stat = static_cast<SerializeStatus>(fprime_rs_lbb_read_bytes(READ_STATE, valBuffAddr, storedLength));
+    if (stat != FW_SERIALIZE_OK) {
+        return stat;
+    }
+    // Advanced here, after setBuffLen, exactly as the original does. Moving
+    // it into the copy and subtracting back on failure is not equivalent when
+    // `val` aliases this object: setBuffLen would zero the cursor and the
+    // compensation would then undo the wrong value.
+    stat = val.setBuffLen(storedLength);
+    if (stat != FW_SERIALIZE_OK) {
+        return stat;
+    }
+    this->m_deserLoc += storedLength;
+    return FW_SERIALIZE_OK;
+""",
+    ),
+    (
+        "SerializeStatus LinearBufferBase::setBuff(const U8* src, Serializable::SizeType length)",
+        """    if (this->m_capacity < length) {
+        return FW_SERIALIZE_NO_ROOM_LEFT;
+    }
+    FW_ASSERT(src);
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    return static_cast<SerializeStatus>(fprime_rs_lbb_set_buff(STATE, src, length));
+""",
+    ),
+    (
+        "void LinearBufferBase::copyFrom(const LinearBufferBase& src)",
+        """    // Statement order is the original's: cursors first, then the three
+    // asserts in their original sequence, then the copy. Only the copy is
+    // Rust's; reordering would change which assert fires, and so which fault
+    // an operator sees, for an object that violates more than one.
+    this->m_serLoc = src.m_serLoc;
+    this->m_deserLoc = src.m_deserLoc;
+    FW_ASSERT(src.m_buffAddr != nullptr);
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    FW_ASSERT(src.m_serLoc <= this->m_capacity, static_cast<FwAssertArgType>(src.m_serLoc),
+              static_cast<FwAssertArgType>(this->m_capacity));
+    fprime_rs_lbb_copy_bytes(this->m_buffAddr, this->m_capacity, src.m_buffAddr, this->m_serLoc);
+""",
+    ),
+]
+
+REPLACEMENTS += [
+    (sig, body.replace("READ_STATE", READ_STATE).replace("STATE", STATE))
+    for sig, body in BULK_REPLACEMENTS
+]
+
+
 for _width in ("U16", "U32", "U64"):
     _rs = _width.lower()
     REPLACEMENTS.append(
@@ -188,123 +323,23 @@ for _width in ("U16", "U32", "U64"):
     )
 
 
-def find_body(text, open_brace):
-    """Return the index just past the brace matching the one at open_brace.
-
-    Skips braces inside comments and character/string literals. The bodies
-    being replaced are plain arithmetic, but a mis-matched brace here would
-    corrupt the framework's hottest file silently, so the scan is careful.
-    """
-    assert text[open_brace] == "{"
-    depth = 0
-    i = open_brace
-    end = len(text)
-    while i < end:
-        c = text[i]
-        if c == "/" and i + 1 < end and text[i + 1] == "/":
-            i = text.find("\n", i)
-            if i == -1:
-                break
-            continue
-        if c == "/" and i + 1 < end and text[i + 1] == "*":
-            i = text.find("*/", i + 2)
-            if i == -1:
-                raise ValueError("unterminated block comment")
-            i += 2
-            continue
-        if c in "\"'":
-            quote = c
-            i += 1
-            while i < end and text[i] != quote:
-                i += 2 if text[i] == "\\" else 1
-            i += 1
-            continue
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    raise ValueError("unbalanced braces")
-
-
-def generate():
-    text = SOURCE.read_text()
-
-    for signature, body in REPLACEMENTS:
-        count = text.count(signature)
-        if count != 1:
-            raise SystemExit(
-                f"{SOURCE.relative_to(REPO)}: expected exactly one "
-                f"'{signature}', found {count}. The upstream kernel changed "
-                f"shape; update {pathlib.Path(__file__).name}."
-            )
-        start = text.index(signature)
-        open_brace = text.index("{", start + len(signature))
-        close = find_body(text, open_brace)
-        text = text[: open_brace + 1] + "\n" + body + "}" + text[close:]
-
-    # Replace the original banner (everything up to the first #include) and
-    # add the kernel declarations next to it.
-    first_include = text.index("#include")
-    text = BANNER + text[first_include:]
-    text = text.replace(KERNEL_INCLUDE, "", 1)  # idempotent if the source ever grows it
-    # clang-format's include ordering puts the quoted project header after
-    # the angle-bracket ones, so emit it there rather than next to the banner.
-    anchor = "#include <cstring>  // memcpy\n"
-    if anchor not in text:
-        raise SystemExit("could not locate the cstring include")
-    text = text.replace(anchor, anchor + KERNEL_INCLUDE, 1)
-
-    namespace = "namespace Fw {\n"
-    if text.count(namespace) != 1:
-        raise SystemExit("expected exactly one 'namespace Fw {' opening")
-    text = text.replace(namespace, ENDIAN_GUARD + namespace, 1)
-
-    return text
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="verify the checked-in file matches; exit 1 on drift",
-    )
-    args = parser.parse_args()
-
-    generated = generate()
-
-    if not args.check:
-        TARGET.write_text(generated)
-        print(f"wrote {TARGET.relative_to(REPO)}")
-        return 0
-
-    if not TARGET.exists():
-        print(f"{TARGET.relative_to(REPO)} is missing; run without --check")
-        return 1
-    current = TARGET.read_text()
-    if current == generated:
-        print(f"{TARGET.relative_to(REPO)} is up to date")
-        return 0
-
-    sys.stdout.writelines(
-        difflib.unified_diff(
-            current.splitlines(keepends=True),
-            generated.splitlines(keepends=True),
-            fromfile=f"{TARGET.relative_to(REPO)} (checked in)",
-            tofile=f"{TARGET.relative_to(REPO)} (regenerated)",
-        )
-    )
-    print(
-        f"\n{TARGET.relative_to(REPO)} is stale with respect to "
-        f"{SOURCE.relative_to(REPO)}.\n"
-        "Run: python3 tools/fprime-rs/gen_fw_kernel.py",
-        file=sys.stderr,
-    )
-    return 1
+SHIM = shimgen.Shim(
+    source=SOURCE,
+    target=TARGET,
+    banner=BANNER,
+    replacements=REPLACEMENTS,
+    edits=[
+        # clang-format's include ordering puts the quoted project header after
+        # the angle-bracket ones, so emit it there rather than by the banner.
+        (
+            "#include <cstring>  // memcpy\n",
+            "#include <cstring>  // memcpy\n" + KERNEL_INCLUDE,
+            True,
+        ),
+    ],
+    preamble=("namespace Fw {\n", ENDIAN_GUARD),
+)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(shimgen.main(SHIM, __doc__))

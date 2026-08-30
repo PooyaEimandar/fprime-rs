@@ -3,12 +3,14 @@
 //
 // Rust-backed implementation of the Fw serialization kernel (fprime-rs
 // Phase 8 -- the flip point). Every method, class and semantic is the
-// original's; what changed is that the primitive reads and writes call into
-// Rust (Rust/fprime-core/src/lib.rs Cursor) instead of manipulating bytes
-// here. The remaining signed and floating-point overloads are untouched
-// because they already delegate to these primitives, so every primitive
-// SCALAR serialization goes through Rust. Bulk byte movement (setBuff,
-// copyRaw, the pointer/length overloads) stays C++ memcpy.
+// original's; what changed is that the primitive reads and writes, and the
+// bulk byte transfers, call into Rust (Rust/fprime-core, Rust/fprime-ffi)
+// instead of manipulating bytes here. The remaining signed and floating-point
+// overloads are untouched because they already delegate to these primitives,
+// and copyRaw/copyRawOffset are covered transitively through the
+// destination's setBuff and serializeFrom. What is left in C++ is the four
+// memcpy-based float bit-casts, which are type punning rather than buffer
+// movement, and the arithmetic around the calls.
 //
 // Selected instead of Serializable.cpp via FPRIME_RUST_IMPL_FW_TYPES; the
 // oracle is the entire existing C++ test suite.
@@ -28,6 +30,33 @@
 #include <Fw/Types/String.hpp>
 #include <iomanip>
 #endif
+
+// clang-format off
+// Fingerprints of the upstream bodies this generator replaced or
+// removed. The generated file does not contain them, so nothing else
+// would notice if upstream changed one -- a mismatch here means the
+// C++ that the Rust implementation mirrors has moved and needs
+// re-reviewing. The `removed:` entries are the helper functions the
+// Rust reimplements, and are the reason this table exists at all.
+//
+//   serializeFrom(U8, Endianness)                                              11b69bd018ed
+//   serializeFrom(bool, Endianness)                                            ac68e22174ba
+//   deserializeTo(U8&, Endianness)                                             a10eb451635f
+//   deserializeTo(bool&, Endianness)                                           948a237dcdc2
+//   deserializeTo(I8&, Endianness)                                             fd2e4752a678
+//   serializeFrom(const U8*, FwSizeType, Serialization::t, Endianness)         d29359500540
+//   serializeFrom(const LinearBufferBase&, Endianness)                         0565502a4fcc
+//   deserializeTo(U8*, Serializable::SizeType&, Serialization::t, Endianness)  6060ee6f4960
+//   deserializeTo(LinearBufferBase&, Endianness)                               f38fe31ed97a
+//   setBuff(const U8*, Serializable::SizeType)                                 517766c9ea89
+//   copyFrom(const LinearBufferBase&)                                          a12294df9e6e
+//   serializeFrom(U16, Endianness)                                             70c73a780321
+//   deserializeTo(U16&, Endianness)                                            f75b53adceea
+//   serializeFrom(U32, Endianness)                                             e9e0fa83674a
+//   deserializeTo(U32&, Endianness)                                            3534d2242d2a
+//   serializeFrom(U64, Endianness)                                             1de569b462bc
+//   deserializeTo(U64&, Endianness)                                            0c5d31ef439e
+// clang-format on
 
 // The endianness mode is passed to Rust as its raw enum value rather than
 // re-encoded, so an out-of-range mode still trips the assert (in the Rust
@@ -74,16 +103,17 @@ LinearBufferBase::LinearBufferBase(U8* buffAddr, Serializable::SizeType capacity
 LinearBufferBase::~LinearBufferBase() {}
 
 void LinearBufferBase::copyFrom(const LinearBufferBase& src) {
+    // Statement order is the original's: cursors first, then the three
+    // asserts in their original sequence, then the copy. Only the copy is
+    // Rust's; reordering would change which assert fires, and so which fault
+    // an operator sees, for an object that violates more than one.
     this->m_serLoc = src.m_serLoc;
     this->m_deserLoc = src.m_deserLoc;
-    const U8* srcBuffAddr = src.m_buffAddr;
-    U8* thisBuffAddr = this->m_buffAddr;
-    FW_ASSERT(srcBuffAddr != nullptr);
-    FW_ASSERT(thisBuffAddr != nullptr);
-    // destination has to be same or bigger
+    FW_ASSERT(src.m_buffAddr != nullptr);
+    FW_ASSERT(this->m_buffAddr != nullptr);
     FW_ASSERT(src.m_serLoc <= this->m_capacity, static_cast<FwAssertArgType>(src.m_serLoc),
               static_cast<FwAssertArgType>(this->m_capacity));
-    (void)memcpy(thisBuffAddr, srcBuffAddr, static_cast<size_t>(this->m_serLoc));
+    fprime_rs_lbb_copy_bytes(this->m_buffAddr, this->m_capacity, src.m_buffAddr, this->m_serLoc);
 }
 
 // Copy constructor doesn't make sense in this virtual class as there is nothing to copy. Derived classes should
@@ -171,35 +201,25 @@ FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::serializeFrom(co
     return this->serializeFrom(buff, static_cast<FwSizeType>(length), Serialization::INCLUDE_LENGTH, endianMode);
 }
 
-FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus
-LinearBufferBase::serializeFrom(const U8* buff,
-                                FwSizeType length,
-                                Serialization::t lengthMode,
-                                Endianness endianMode) {  // First serialize length
-    SerializeStatus stat;
+FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::serializeFrom(const U8* buff,
+                                                                              FwSizeType length,
+                                                                              Serialization::t lengthMode,
+                                                                              Endianness endianMode) {
     if (lengthMode == Serialization::INCLUDE_LENGTH) {
-        stat = this->serializeFrom(static_cast<FwSizeStoreType>(length), endianMode);
+        const SerializeStatus stat = this->serializeFrom(static_cast<FwSizeStoreType>(length), endianMode);
         if (stat != FW_SERIALIZE_OK) {
             return stat;
         }
     }
-
-    // make sure we have enough space
     if (this->m_serLoc + length > this->m_capacity) {
         return FW_SERIALIZE_NO_ROOM_LEFT;
     }
-
     if (length > 0) {
         FW_ASSERT(buff != nullptr);
     }
-    U8* buffAddr = this->m_buffAddr;
-    FW_ASSERT(buffAddr != nullptr);
-    // copy buffer to our buffer; memmove is used because the source may overlap this buffer
-    (void)memmove(&buffAddr[this->m_serLoc], buff, static_cast<size_t>(length));
-    this->m_serLoc += static_cast<Serializable::SizeType>(length);
-    this->m_deserLoc = 0;
-
-    return FW_SERIALIZE_OK;
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    return static_cast<SerializeStatus>(
+        fprime_rs_lbb_ser_bytes(this->m_buffAddr, this->m_capacity, &this->m_serLoc, &this->m_deserLoc, buff, length));
 }
 
 FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::serializeFrom(const Serializable& val,
@@ -209,27 +229,19 @@ FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::serializeFrom(co
 
 FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::serializeFrom(const LinearBufferBase& val,
                                                                               Endianness mode) {
-    Serializable::SizeType size = val.getSize();
+    const Serializable::SizeType size = val.getSize();
     if (this->m_serLoc + size + static_cast<Serializable::SizeType>(sizeof(FwSizeStoreType)) > this->m_capacity) {
         return FW_SERIALIZE_NO_ROOM_LEFT;
     }
-
-    // First, serialize size
-    SerializeStatus stat = this->serializeFrom(static_cast<FwSizeStoreType>(size), mode);
+    const SerializeStatus stat = this->serializeFrom(static_cast<FwSizeStoreType>(size), mode);
     if (stat != FW_SERIALIZE_OK) {
         return stat;
     }
-
-    U8* thisBuffAddr = this->m_buffAddr;
     const U8* valBuffAddr = val.getBuffAddr();
-    FW_ASSERT(thisBuffAddr != nullptr);
+    FW_ASSERT(this->m_buffAddr != nullptr);
     FW_ASSERT(valBuffAddr != nullptr);
-    // serialize buffer
-    (void)memcpy(&thisBuffAddr[this->m_serLoc], valBuffAddr, static_cast<size_t>(size));
-    this->m_serLoc += size;
-    this->m_deserLoc = 0;
-
-    return FW_SERIALIZE_OK;
+    return static_cast<SerializeStatus>(fprime_rs_lbb_ser_bytes(this->m_buffAddr, this->m_capacity, &this->m_serLoc,
+                                                                &this->m_deserLoc, valBuffAddr, size));
 }
 
 FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::serializeSize(const FwSizeType size, Endianness mode) {
@@ -364,43 +376,35 @@ FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::deserializeTo(U8
                                                                               Serializable::SizeType& length,
                                                                               Serialization::t lengthMode,
                                                                               Endianness endianMode) {
-    U8* buffAddr = this->m_buffAddr;
-    FW_ASSERT(buffAddr != nullptr);
-
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    FwSizeType transfer = static_cast<FwSizeType>(length);
     if (lengthMode == Serialization::INCLUDE_LENGTH) {
         FwSizeStoreType storedLength = 0;
-
-        SerializeStatus stat = this->deserializeTo(storedLength, endianMode);
-
+        const SerializeStatus stat = this->deserializeTo(storedLength, endianMode);
         if (stat != FW_SERIALIZE_OK) {
             return stat;
         }
-
-        // make sure it fits
+        // Both halves of the original's check stay here, and stay ahead of
+        // the assert below: a length that overruns the buffer is a status,
+        // not a fault, and splitting the test across the language boundary
+        // would let the assert win.
         if ((storedLength > this->getDeserializeSizeLeft()) || (storedLength > length)) {
             return FW_DESERIALIZE_SIZE_MISMATCH;
         }
-
-        if (storedLength > 0) {
-            FW_ASSERT(buff != nullptr);
-        }
-        (void)memcpy(buff, &buffAddr[this->m_deserLoc], static_cast<size_t>(storedLength));
-
-        length = static_cast<FwSizeType>(storedLength);
-
-    } else {
-        // make sure enough is left
-        if (length > this->getDeserializeSizeLeft()) {
-            return FW_DESERIALIZE_SIZE_MISMATCH;
-        }
-
-        if (length > 0) {
-            FW_ASSERT(buff != nullptr);
-        }
-        (void)memcpy(buff, &buffAddr[this->m_deserLoc], static_cast<size_t>(length));
+        transfer = static_cast<FwSizeType>(storedLength);
+    } else if (transfer > this->getDeserializeSizeLeft()) {
+        return FW_DESERIALIZE_SIZE_MISMATCH;
     }
-
-    this->m_deserLoc += static_cast<Serializable::SizeType>(length);
+    if (transfer > 0) {
+        FW_ASSERT(buff != nullptr);
+    }
+    const SerializeStatus status = static_cast<SerializeStatus>(
+        fprime_rs_lbb_read_bytes(this->m_buffAddr, this->m_capacity, this->m_serLoc, this->m_deserLoc, buff, transfer));
+    if (status != FW_SERIALIZE_OK) {
+        return status;
+    }
+    length = static_cast<Serializable::SizeType>(transfer);
+    this->m_deserLoc += static_cast<Serializable::SizeType>(transfer);
     return FW_SERIALIZE_OK;
 }
 
@@ -411,34 +415,29 @@ FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::deserializeTo(Se
 FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::deserializeTo(LinearBufferBase& val, Endianness mode) {
     U8* valBuffAddr = val.getBuffAddr();
     FW_ASSERT(valBuffAddr != nullptr);
-    SerializeStatus stat = FW_SERIALIZE_OK;
-
     FwSizeStoreType storedLength = 0;
-
-    stat = this->deserializeTo(storedLength, mode);
-
+    SerializeStatus stat = this->deserializeTo(storedLength, mode);
     if (stat != FW_SERIALIZE_OK) {
         return stat;
     }
-
-    // make sure destination has enough room
-
     if ((storedLength > val.getCapacity()) || (storedLength > this->getDeserializeSizeLeft())) {
         return FW_DESERIALIZE_SIZE_MISMATCH;
     }
-
-    U8* thisBuffAddr = this->m_buffAddr;
-    FW_ASSERT(thisBuffAddr != nullptr);
-    (void)memcpy(valBuffAddr, &thisBuffAddr[this->m_deserLoc], static_cast<size_t>(storedLength));
-
-    stat = val.setBuffLen(storedLength);
-
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    stat = static_cast<SerializeStatus>(fprime_rs_lbb_read_bytes(this->m_buffAddr, this->m_capacity, this->m_serLoc,
+                                                                 this->m_deserLoc, valBuffAddr, storedLength));
     if (stat != FW_SERIALIZE_OK) {
         return stat;
     }
-
+    // Advanced here, after setBuffLen, exactly as the original does. Moving
+    // it into the copy and subtracting back on failure is not equivalent when
+    // `val` aliases this object: setBuffLen would zero the cursor and the
+    // compensation would then undo the wrong value.
+    stat = val.setBuffLen(storedLength);
+    if (stat != FW_SERIALIZE_OK) {
+        return stat;
+    }
     this->m_deserLoc += storedLength;
-
     return FW_SERIALIZE_OK;
 }
 
@@ -507,15 +506,11 @@ Serializable::SizeType LinearBufferBase::getSize() const {
 FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::setBuff(const U8* src, Serializable::SizeType length) {
     if (this->m_capacity < length) {
         return FW_SERIALIZE_NO_ROOM_LEFT;
-    } else {
-        FW_ASSERT(src);
-        U8* buffAddr = this->m_buffAddr;
-        FW_ASSERT(buffAddr != nullptr);
-        (void)memcpy(buffAddr, src, static_cast<size_t>(length));
-        this->m_serLoc = length;
-        this->m_deserLoc = 0;
-        return FW_SERIALIZE_OK;
     }
+    FW_ASSERT(src);
+    FW_ASSERT(this->m_buffAddr != nullptr);
+    return static_cast<SerializeStatus>(
+        fprime_rs_lbb_set_buff(this->m_buffAddr, this->m_capacity, &this->m_serLoc, &this->m_deserLoc, src, length));
 }
 
 FW_SERIALIZE_FORCE_INLINE_LBB SerializeStatus LinearBufferBase::setBuffLen(Serializable::SizeType length) {

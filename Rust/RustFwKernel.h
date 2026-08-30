@@ -9,9 +9,10 @@
 //
 // Only the unsigned integers and bool appear: the C++ kernel routes the
 // signed and floating-point overloads through them, so these ten entry
-// points carry every primitive SCALAR serialization in the framework. Bulk
-// byte movement (serializeFrom(const U8*, ...), deserializeTo(U8*, ...),
-// setBuff, copyRaw/copyRawOffset, copyFrom) stays C++ memcpy.
+// points carry every primitive SCALAR serialization in the framework. The
+// bulk byte paths are declared below and route through Rust too;
+// copyRaw/copyRawOffset are covered transitively, since they delegate to
+// setBuff and serializeFrom on the destination.
 //
 // The deserialize entries take a const buffer bounded by serLoc rather than
 // capacity: a read can never touch a byte past the write high-water mark, so
@@ -54,6 +55,20 @@ int32_t fprime_rs_lbb_ser_bool(uint8_t* data, FwSizeType capacity, FwSizeType* s
                                bool value);
 int32_t fprime_rs_lbb_deser_bool(const uint8_t* data, FwSizeType capacity, const FwSizeType* serLoc,
                                  FwSizeType* deserLoc, bool* value);
+
+// Bulk transfers: the payload paths. `src`/`dest` may overlap the object's
+// own storage -- these have memmove semantics, unlike the memcpy they replace.
+// read_bytes and copy_bytes move bytes only: the shim keeps every cursor
+// update and every FW_ASSERT in the original's order, because which check
+// fires first is observable -- as a status vs an abort, and as which fault an
+// operator sees.
+int32_t fprime_rs_lbb_ser_bytes(uint8_t* data, FwSizeType capacity, FwSizeType* serLoc, FwSizeType* deserLoc,
+                                const uint8_t* src, FwSizeType length);
+int32_t fprime_rs_lbb_read_bytes(const uint8_t* data, FwSizeType capacity, FwSizeType serLoc, FwSizeType deserLoc,
+                                 uint8_t* dest, FwSizeType length);
+int32_t fprime_rs_lbb_set_buff(uint8_t* data, FwSizeType capacity, FwSizeType* serLoc, FwSizeType* deserLoc,
+                               const uint8_t* src, FwSizeType length);
+void fprime_rs_lbb_copy_bytes(uint8_t* dst, FwSizeType dstCapacity, const uint8_t* src, FwSizeType length);
 
 #ifdef __cplusplus
 }

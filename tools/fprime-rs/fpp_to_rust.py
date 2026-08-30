@@ -781,8 +781,6 @@ def main():
     )
 
 
-
-
 # ---------------------------------------------------------------------------
 # Component glue generation (Phase 7)
 # ---------------------------------------------------------------------------
@@ -829,7 +827,9 @@ def collect_ports(ast, analysis, component_name, where):
             chosen = entry
             break
     if chosen is None:
-        raise GeneratorError(f"{where}: no component named '{component_name}' in the model")
+        raise GeneratorError(
+            f"{where}: no component named '{component_name}' in the model"
+        )
 
     ports = []
     for port_name, spec in chosen["portInterface"]["portMap"].items():
@@ -845,7 +845,13 @@ def collect_ports(ast, analysis, component_name, where):
         definition = port_defs.get(port_symbol["nodeId"])
         if definition is None:
             raise GeneratorError(f"{where}.{port_name}: port definition not found")
-        ports.append(Port(port_name, kind, port_params(definition, analysis, f"{where}.{port_name}")))
+        ports.append(
+            Port(
+                port_name,
+                kind,
+                port_params(definition, analysis, f"{where}.{port_name}"),
+            )
+        )
     ports.sort(key=lambda port: port.name)
     return ports
 
@@ -900,7 +906,9 @@ def port_params(definition, analysis, where):
     params = []
     for entry in definition["params"]:
         data, _ = unwrap(entry[1])
-        kind = next(iter(data["kind"])) if isinstance(data["kind"], dict) else data["kind"]
+        kind = (
+            next(iter(data["kind"])) if isinstance(data["kind"], dict) else data["kind"]
+        )
         if kind != "Value":
             raise GeneratorError(
                 f"{where}.{data['name']}: `ref` parameters are not generated yet"
@@ -921,9 +929,16 @@ def c_type(desc):
     if desc[0] == "bool":
         return "bool"
     return {
-        "u8": "uint8_t", "u16": "uint16_t", "u32": "uint32_t", "u64": "uint64_t",
-        "i8": "int8_t", "i16": "int16_t", "i32": "int32_t", "i64": "int64_t",
-        "f32": "float", "f64": "double",
+        "u8": "uint8_t",
+        "u16": "uint16_t",
+        "u32": "uint32_t",
+        "u64": "uint64_t",
+        "i8": "int8_t",
+        "i16": "int16_t",
+        "i32": "int32_t",
+        "i64": "int64_t",
+        "f32": "float",
+        "f64": "double",
     }[desc[1]]
 
 
@@ -979,7 +994,9 @@ def generate_component_rust(module_path, component, ports, model_label):
         f"pub trait {trait}: Sync {{",
     ]
     for port in ports:
-        args = "".join(f", {name}: {rust_param_type(desc)}" for name, desc in port.params)
+        args = "".join(
+            f", {name}: {rust_param_type(desc)}" for name, desc in port.params
+        )
         out.append(f"    /// `{port.name}` ({port.kind})")
         out.append(f"    fn {snake(port.name)}(&self, port_num: i32{args});")
     out.append("}")
@@ -989,7 +1006,9 @@ def generate_component_rust(module_path, component, ports, model_label):
     out.append("/// Takes a reference to a `'static` trait object reference, so the")
     out.append("/// resulting thin pointer stays valid for the life of the program and")
     out.append("/// nothing needs an allocator.")
-    out.append(f"pub fn handler_ptr(handlers: &'static &'static dyn {trait}) -> *const c_void {{")
+    out.append(
+        f"pub fn handler_ptr(handlers: &'static &'static dyn {trait}) -> *const c_void {{"
+    )
     out.append("    handlers as *const _ as *const c_void")
     out.append("}")
     out.append("")
@@ -1003,26 +1022,34 @@ def generate_component_rust(module_path, component, ports, model_label):
     out.append("    if handlers.is_null() {")
     out.append("        return None;")
     out.append("    }")
-    out.append("    // SAFETY: the caller guarantees this came from `handler_ptr`, which")
-    out.append("    // produces a pointer to a `'static` trait-object reference.")
     out.append(
-        f"    Some(*unsafe {{ &*(handlers as *const &'static dyn {trait}) }})"
+        "    // SAFETY: the caller guarantees this came from `handler_ptr`, which"
     )
+    out.append("    // produces a pointer to a `'static` trait-object reference.")
+    out.append(f"    Some(*unsafe {{ &*(handlers as *const &'static dyn {trait}) }})")
     out.append("}")
     out.append("")
     for port in ports:
-        c_args = "".join(f", {name}: {rust_param_type(desc)}" for name, desc in port.params)
+        c_args = "".join(
+            f", {name}: {rust_param_type(desc)}" for name, desc in port.params
+        )
         call_args = "".join(f", {name}" for name, _ in port.params)
-        out.append(f"/// Dispatch stub for `{port.name}`, called by the generated C++ shim.")
+        out.append(
+            f"/// Dispatch stub for `{port.name}`, called by the generated C++ shim."
+        )
         out.append("///")
         out.append("/// # Safety")
-        out.append("/// `handlers` must be a pointer produced by [`handler_ptr`], or null.")
+        out.append(
+            "/// `handlers` must be a pointer produced by [`handler_ptr`], or null."
+        )
         out.append("#[no_mangle]")
         out.append(
             f'pub unsafe extern "C" fn {prefix}_{port.name}('
             f"handlers: *const c_void, port_num: i32{c_args}) {{"
         )
-        out.append("    // SAFETY: forwarded unchanged from the shim, which stores only")
+        out.append(
+            "    // SAFETY: forwarded unchanged from the shim, which stores only"
+        )
         out.append("    // pointers produced by `handler_ptr`.")
         out.append("    if let Some(handlers) = unsafe { handlers_from(handlers) } {")
         out.append(f"        handlers.{snake(port.name)}(port_num{call_args});")
@@ -1059,13 +1086,17 @@ def generate_component_header(module_path, component, ports, model_label):
     for port in ports:
         args = "".join(f", {c_type(desc)} {name}" for name, desc in port.params)
         out.append(f"//! Dispatch `{port.name}` ({port.kind}) into the Rust handler")
-        out.append(f"void {prefix}_{port.name}(const void* handlers, int32_t portNum{args});")
+        out.append(
+            f"void {prefix}_{port.name}(const void* handlers, int32_t portNum{args});"
+        )
         out.append("")
     out += ["#ifdef __cplusplus", "}", "#endif", "", f"#endif  // {guard}", ""]
     return "\n".join(out)
 
 
-def generate_component_shim(module_path, component, ports, model_label, include_path, glue_include):
+def generate_component_shim(
+    module_path, component, ports, model_label, include_path, glue_include
+):
     """The C++ shim: the component class, forwarding each handler into Rust."""
     namespace = module_path[0] if module_path else "Components"
     out = [
@@ -1133,10 +1164,17 @@ def emit_component(ast, analysis, args):
         )
 
     writes = [
-        (args.out, generate_component_rust(module_path, args.component, ports, args.module_name)),
+        (
+            args.out,
+            generate_component_rust(
+                module_path, args.component, ports, args.module_name
+            ),
+        ),
         (
             args.out_header,
-            generate_component_header(module_path, args.component, ports, args.module_name),
+            generate_component_header(
+                module_path, args.component, ports, args.module_name
+            ),
         ),
         (
             args.out_shim,

@@ -799,3 +799,90 @@ mod cursor_tests {
         assert_eq!(s, 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bulk transfer planning (Phase 8)
+// ---------------------------------------------------------------------------
+//
+// The bulk byte paths (`serializeFrom(const U8*, ...)`, `deserializeTo(U8*,
+// ...)`, `setBuff`, `copyFrom`) move a caller-supplied count of bytes into or
+// out of the object's storage. The *copy* has to happen behind raw pointers
+// in `fprime-ffi`, because the C++ contract explicitly allows the source to
+// overlap the destination and two aliasing Rust slices are UB. What can live
+// here — safe, and unit-tested — is the arithmetic that decides whether the
+// transfer is legal at all, which is where the exposure actually is: these
+// lengths come off the wire.
+
+/// Bytes the object can still accept at `ser_loc`, or the status the C++
+/// returns when it cannot accept `length`.
+///
+/// Mirrors `m_serLoc + length > m_capacity` without the overflow that
+/// expression has for a wire-supplied `length` near the type's maximum.
+pub fn plan_bulk_write(ser_loc: FwSizeType, length: FwSizeType, capacity: FwSizeType) -> SerResult {
+    match ser_loc.checked_add(length) {
+        Some(end) if end <= capacity => Ok(()),
+        _ => Err(SerError::NoRoomLeft),
+    }
+}
+
+/// Checks a read of `length` bytes at `deser_loc` against the write
+/// high-water mark, mirroring the C++ `getDeserializeSizeLeft()` comparison.
+///
+/// `deser_loc` past `ser_loc` is an inconsistent object. The C++
+/// `getDeserializeSizeLeft()` **asserts** on it (`FW_ASSERT(m_serLoc >=
+/// m_deserLoc)`) rather than wrapping, and the shims still call it, so that
+/// fault is preserved on the paths that go through them; this `checked_sub`
+/// is a second line of defense for callers that do not, and reports a size
+/// mismatch rather than reading out of bounds.
+pub fn plan_bulk_read(ser_loc: FwSizeType, deser_loc: FwSizeType, length: FwSizeType) -> SerResult {
+    match ser_loc.checked_sub(deser_loc) {
+        Some(left) if length <= left => Ok(()),
+        _ => Err(SerError::SizeMismatch),
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[test]
+    fn write_fits_exactly_to_capacity() {
+        assert_eq!(plan_bulk_write(4, 4, 8), Ok(()));
+        assert_eq!(plan_bulk_write(0, 8, 8), Ok(()));
+        assert_eq!(plan_bulk_write(8, 0, 8), Ok(()));
+    }
+
+    #[test]
+    fn write_one_past_capacity_is_refused() {
+        assert_eq!(plan_bulk_write(4, 5, 8), Err(SerError::NoRoomLeft));
+        assert_eq!(plan_bulk_write(0, 9, 8), Err(SerError::NoRoomLeft));
+    }
+
+    #[test]
+    fn write_length_near_the_maximum_does_not_wrap() {
+        // The C++ `m_serLoc + length > m_capacity` wraps here and would admit
+        // the transfer; the checked add refuses it.
+        assert_eq!(
+            plan_bulk_write(8, FwSizeType::MAX, 16),
+            Err(SerError::NoRoomLeft)
+        );
+        assert_eq!(
+            plan_bulk_write(FwSizeType::MAX, 1, FwSizeType::MAX),
+            Err(SerError::NoRoomLeft)
+        );
+    }
+
+    #[test]
+    fn read_is_bounded_by_the_write_high_water_mark() {
+        assert_eq!(plan_bulk_read(8, 2, 6), Ok(()));
+        assert_eq!(plan_bulk_read(8, 2, 7), Err(SerError::SizeMismatch));
+        assert_eq!(plan_bulk_read(8, 8, 0), Ok(()));
+    }
+
+    #[test]
+    fn read_with_cursors_inverted_is_refused_not_wrapped() {
+        // deser_loc > ser_loc: the C++ subtraction wraps to a huge "left".
+        assert_eq!(plan_bulk_read(2, 8, 1), Err(SerError::SizeMismatch));
+        assert_eq!(plan_bulk_read(2, 8, 0), Err(SerError::SizeMismatch));
+    }
+}

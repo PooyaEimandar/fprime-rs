@@ -6,9 +6,13 @@ on:
     paths:
       - "Rust/**"
       - "tools/fprime-rs/**"
-      # Phase 8: an upstream edit here must re-run gen_fw_kernel.py --check,
-      # otherwise the Rust-backed kernel silently diverges from the original
+      # Phases 8 and 9: an upstream edit to a file a generated shim mirrors
+      # must re-run its --check, or the Rust-backed copy diverges silently
       - "Fw/Types/**"
+      - "Os/FilePathUtils*"
+      - "Os/SandboxedFile.cpp"
+      - "Os/Generic/**"
+      - "Os/CMakeLists.txt"
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
@@ -31,9 +35,13 @@ on:
     paths:
       - "Rust/**"
       - "tools/fprime-rs/**"
-      # Phase 8: an upstream edit here must re-run gen_fw_kernel.py --check,
-      # otherwise the Rust-backed kernel silently diverges from the original
+      # Phases 8 and 9: an upstream edit to a file a generated shim mirrors
+      # must re-run its --check, or the Rust-backed copy diverges silently
       - "Fw/Types/**"
+      - "Os/FilePathUtils*"
+      - "Os/SandboxedFile.cpp"
+      - "Os/Generic/**"
+      - "Os/CMakeLists.txt"
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
@@ -93,17 +101,30 @@ jobs:
             --out-cpp /tmp/generated-check.cpp
           diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
           diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp
-      - name: Rust-backed Fw kernel matches Serializable.cpp
-        # Phase 8: SerializableRust.cpp is a generated near-copy of the
-        # upstream kernel. Catch an upstream edit that never reached it --
-        # otherwise the C++ and Rust kernels drift apart silently.
+      - name: Generated Rust-backed C++ shims match their originals
+        # Phases 8 and 9: each of these is a generated near-copy of an
+        # upstream file. Catch an upstream edit that never reached one --
+        # otherwise the C++ and Rust implementations drift apart silently.
+        # Needs no toolchain beyond Python, so it runs in this light job too.
         working-directory: .
-        run: python3 tools/fprime-rs/gen_fw_kernel.py --check
+        run: |
+          python3 tools/fprime-rs/gen_fw_kernel.py --check
+          python3 tools/fprime-rs/gen_os_maxheap.py --check
+          python3 tools/fprime-rs/gen_os_filepath.py --check
+      - name: The drift check itself still catches drift
+        # Every --check above runs against a pristine tree, so it only ever
+        # exercises the pass path. This mutates copies and asserts that real
+        # divergences -- a `..` escaping the sandbox root, an inverted heap
+        # tie-break, a moved buffer boundary -- are still caught.
+        working-directory: .
+        run: python3 tools/fprime-rs/test_shimgen.py
   framework-check:
     # Builds the C++ framework with the Rust implementations selected and runs
     # the affected unit-test suites (the equivalence oracles): the codec
     # differential UT plus the Fw/Types suite (the oracle for the Phase 8
-    # serialization kernel), CircularBuffer/Queue, CRC32, CFDP checksum,
+    # serialization kernel), the Os, Os/Generic and Os/Generic/Types suites
+    # (Phase 9's path resolution and max heap, plus the three priority-queue
+    # suites that run on top of the heap), CircularBuffer/Queue, CRC32, CFDP checksum,
     # FprimeDeframer/FprimeFramer, FrameAccumulator (incl. detector tests),
     # FprimeRouter and ComQueue suites, plus the RustDemo component whose glue
     # is fully generated -- all against the Rust-backed modules, under
@@ -167,9 +188,24 @@ jobs:
         run: |
           . fprime-venv/bin/activate
           fprime-util generate --ut -DFPRIME_RUST_AUTOCODE=ON -DFPRIME_RUST_IMPL_FW_TYPES=ON
+      - name: C++ originals still compile with every switch OFF
+        # With a FPRIME_RUST_IMPL_* switch ON, the C++ file it replaces is not
+        # in the build at all -- so an upstream change could stop it compiling
+        # and nothing would notice until someone flipped the switch back. This
+        # builds (not tests) the affected modules in the OFF position, which is
+        # the rollback path, so it stays known-good.
+        run: |
+          . fprime-venv/bin/activate
+          CACHE="$PWD/build-rust-off"
+          fprime-util generate --ut --build-cache "$CACHE" -DFPRIME_ENABLE_RUST=OFF
+          for dir in Fw/Types Os Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
+                     Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator \
+                     Svc/FprimeRouter Svc/ComQueue; do
+            (cd "$dir" && fprime-util build --ut --build-cache "$CACHE" -j4)
+          done
       - name: Check Rust-backed modules
         run: |
           . fprime-venv/bin/activate
-          for dir in Rust Fw/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
+          for dir in Rust Fw/Types Os Os/Generic Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
             (cd "$dir" && fprime-util check -j4)
           done

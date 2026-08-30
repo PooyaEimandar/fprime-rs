@@ -58,6 +58,18 @@ if (BUILD_TESTING AND FPRIME_ENABLE_FRAMEWORK_UTS)
             Svc_FprimeProtocol
     )
 
+    # Phase 8: the bulk byte paths of the Fw serialization kernel. Four of
+    # the six had no coverage at all in Fw/Types/test/ut, and this uses only
+    # the public Fw API, so it passes against either implementation and is
+    # run in both switch positions.
+    register_fprime_ut(
+            Rust_fw_bulk_ut
+        SOURCES
+            "${CMAKE_CURRENT_LIST_DIR}/test/ut/RustFwBulkTest.cpp"
+        DEPENDS
+            Fw_Types
+    )
+
     # Phase 5: the ComQueue scheduler across the shipped FFI, covering the
     # round-robin rotation that ComQueue's own suite never observes.
     register_fprime_ut(

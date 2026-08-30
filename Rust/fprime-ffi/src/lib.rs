@@ -1272,3 +1272,384 @@ pub unsafe extern "C" fn fprime_rs_lbb_deser_bool(
         Err(e) => e.code(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fw::LinearBufferBase bulk transfers (Phase 8)
+// ---------------------------------------------------------------------------
+//
+// These move the payload bytes: strings, Fw::Buffer contents, ComBuffer and DP
+// containers all travel through them, and their lengths come off the wire. The
+// bounds decisions are made by `fprime_core::plan_bulk_*` (safe and unit
+// tested, with checked arithmetic where the C++ expression can wrap); the copy
+// itself is done here with raw pointers because the C++ contract explicitly
+// permits the source to overlap the destination, and two aliasing Rust slices
+// would be UB.
+//
+// Every copy uses `copy` (memmove semantics), never `copy_nonoverlapping`,
+// even where the mirrored C++ uses memcpy: memmove is a superset, so this is
+// defined wherever the original was, and defined in the case it was not.
+
+use fprime_core::{plan_bulk_read, plan_bulk_write};
+
+/// Asserts a pointer is usable for `length` bytes, mirroring the
+/// `FW_ASSERT(... != nullptr)` the C++ bulk paths perform. A zero length
+/// tolerates null, as the C++ does.
+#[inline]
+fn assert_usable(ptr: *const u8, length: FwSizeType, what: &str) {
+    assert!(!ptr.is_null() || length == 0, "{}", what);
+}
+
+/// `serializeFrom(const U8* buff, length, ...)`: append `length` bytes at the
+/// write cursor. The source may overlap this object's storage.
+///
+/// # Safety
+/// `data` must point to `capacity` writable bytes and `src` to `length`
+/// readable bytes (null allowed when the paired size is zero); `ser_loc` and
+/// `deser_loc` must be valid pointers to the object's cursors.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_ser_bytes(
+    data: *mut u8,
+    capacity: FwSizeType,
+    ser_loc: *mut FwSizeType,
+    deser_loc: *mut FwSizeType,
+    src: *const u8,
+    length: FwSizeType,
+) -> i32 {
+    // SAFETY: the caller guarantees this points at the object's write cursor.
+    let at = unsafe { *ser_loc };
+    if let Err(e) = plan_bulk_write(at, length, capacity) {
+        return e.code();
+    }
+    assert_usable(data, length, "LinearBufferBase storage is null");
+    assert_usable(src, length, "bulk serialize source is null");
+    if length > 0 {
+        // SAFETY: `at + length <= capacity` per the plan above, so the
+        // destination range lies inside the caller's storage; overlap with
+        // `src` is permitted and `copy` has memmove semantics.
+        unsafe { core::ptr::copy(src, data.add(at as usize), length as usize) };
+    }
+    // SAFETY: as above; a write rewinds the read cursor, as the C++ does.
+    unsafe {
+        *ser_loc = at + length;
+        *deser_loc = 0;
+    }
+    0
+}
+
+/// Copy `length` bytes out of the object's storage at the read cursor.
+///
+/// Does **not** advance the cursor: the C++ advances it after the copy, and
+/// in `deserializeTo(LinearBufferBase&)` only after a further call that can
+/// fail. Advancing here and compensating on the failure path is not the same
+/// thing when the destination aliases this object, so the cursor stays the
+/// caller's to move.
+///
+/// # Safety
+/// `data` must point to at least `min(ser_loc, capacity)` readable bytes and
+/// `dest` to `length` writable bytes (null allowed when the paired size is
+/// zero).
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_read_bytes(
+    data: *const u8,
+    capacity: FwSizeType,
+    ser_loc: FwSizeType,
+    deser_loc: FwSizeType,
+    dest: *mut u8,
+    length: FwSizeType,
+) -> i32 {
+    let written = ser_loc.min(capacity);
+    if let Err(e) = plan_bulk_read(written, deser_loc, length) {
+        return e.code();
+    }
+    assert_usable(data, length, "LinearBufferBase storage is null");
+    assert_usable(dest, length, "bulk deserialize destination is null");
+    if length > 0 {
+        // SAFETY: `deser_loc + length <= written <= capacity` per the plan
+        // above, so the source range lies inside the caller's storage. `copy`
+        // tolerates an overlapping destination, which the mirrored memcpy did
+        // not.
+        unsafe { core::ptr::copy(data.add(deser_loc as usize), dest, length as usize) };
+    }
+    0
+}
+
+/// `setBuff(const U8* src, length)`: replace the contents and reset both
+/// cursors.
+///
+/// # Safety
+/// As [`fprime_rs_lbb_ser_bytes`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_set_buff(
+    data: *mut u8,
+    capacity: FwSizeType,
+    ser_loc: *mut FwSizeType,
+    deser_loc: *mut FwSizeType,
+    src: *const u8,
+    length: FwSizeType,
+) -> i32 {
+    if let Err(e) = plan_bulk_write(0, length, capacity) {
+        return e.code();
+    }
+    assert_usable(data, length, "LinearBufferBase storage is null");
+    assert_usable(src, length, "setBuff source is null");
+    if length > 0 {
+        // SAFETY: `length <= capacity` per the plan above; overlap permitted.
+        unsafe { core::ptr::copy(src, data, length as usize) };
+    }
+    // SAFETY: the caller guarantees these point at the object's cursors.
+    unsafe {
+        *ser_loc = length;
+        *deser_loc = 0;
+    }
+    0
+}
+
+/// The copy inside `copyFrom(const LinearBufferBase&)`.
+///
+/// Only the copy: the C++ shim keeps the cursor assignment and all three of
+/// the original's asserts, in the original's order, because which assert
+/// fires first is operator-visible for an object that violates more than one.
+///
+/// # Safety
+/// `dst` must point to `dst_capacity` writable bytes and `src` to `length`
+/// readable bytes; both may be null when `length` is zero.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_copy_bytes(
+    dst: *mut u8,
+    dst_capacity: FwSizeType,
+    src: *const u8,
+    length: FwSizeType,
+) {
+    assert!(
+        plan_bulk_write(0, length, dst_capacity).is_ok(),
+        "copy destination is smaller than the source's contents"
+    );
+    assert_usable(src, length, "copy source is null");
+    assert_usable(dst.cast_const(), length, "copy destination is null");
+    if length > 0 {
+        // SAFETY: `length <= dst_capacity` per the assert above; the C++ used
+        // memcpy here, and `copy` (memmove) is defined wherever that was.
+        unsafe { core::ptr::copy(src, dst, length as usize) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Os::Generic MaxHeap (Phase 9)
+// ---------------------------------------------------------------------------
+//
+// The ordering core of the OSAL priority queue: every message a deployment
+// queues to an active component is ordered here. The C++ owns the node array
+// (its `create()` places it in memory the queue supplies) and the two
+// counters; Rust owns the heap algorithm, including the age tie-break that
+// makes equal priorities FIFO.
+//
+// The C++ `MaxHeap::Node` and `fprime_utils::max_heap::Node` must agree on
+// layout: the shim static_asserts size, alignment and every field offset.
+
+use fprime_config::FwQueuePriorityType;
+use fprime_utils::max_heap::{MaxHeap, Node};
+
+/// Borrow a C++ `MaxHeap`'s state for one operation.
+///
+/// # Safety
+/// `nodes` must point to `capacity` initialized `Node`s laid out as the C++
+/// `MaxHeap::Node`, and `size`/`order` must be valid pointers to the object's
+/// counters. `capacity` may be zero, in which case `nodes` may be null.
+unsafe fn heap<'a>(
+    nodes: *mut Node,
+    capacity: FwSizeType,
+    size: *mut FwSizeType,
+    order: *mut FwSizeType,
+) -> MaxHeap<'a> {
+    assert!(
+        !nodes.is_null() || capacity == 0,
+        "MaxHeap storage is null with non-zero capacity"
+    );
+    MaxHeap {
+        nodes: if capacity == 0 {
+            &mut []
+        } else {
+            // SAFETY: the caller guarantees `capacity` initialized nodes at
+            // `nodes`, non-null per the assert above.
+            unsafe { core::slice::from_raw_parts_mut(nodes, capacity as usize) }
+        },
+        // SAFETY: the caller guarantees these point at the object's counters.
+        size: unsafe { &mut *size },
+        // SAFETY: as above.
+        order: unsafe { &mut *order },
+    }
+}
+
+/// `MaxHeap::push`: false when the heap is full.
+///
+/// # Safety
+/// See [`heap`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_maxheap_push(
+    nodes: *mut Node,
+    capacity: FwSizeType,
+    size: *mut FwSizeType,
+    order: *mut FwSizeType,
+    value: FwQueuePriorityType,
+    id: FwSizeType,
+) -> bool {
+    // SAFETY: forwarded from the C++ object that owns this state.
+    let mut heap = unsafe { heap(nodes, capacity, size, order) };
+    heap.push(value, id)
+}
+
+/// `MaxHeap::pop`: false when the heap is empty, in which case `value` and
+/// `id` are left untouched, as the C++ leaves its out-parameters.
+///
+/// # Safety
+/// See [`heap`]; `value` and `id` must be valid pointers.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_maxheap_pop(
+    nodes: *mut Node,
+    capacity: FwSizeType,
+    size: *mut FwSizeType,
+    order: *mut FwSizeType,
+    value: *mut FwQueuePriorityType,
+    id: *mut FwSizeType,
+) -> bool {
+    // SAFETY: forwarded from the C++ object that owns this state.
+    let mut heap = unsafe { heap(nodes, capacity, size, order) };
+    match heap.pop() {
+        Some((popped_value, popped_id)) => {
+            // SAFETY: the caller guarantees both pointers are valid.
+            unsafe {
+                *value = popped_value;
+                *id = popped_id;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Reports the Rust `Node` layout so the C++ shim can pin it against its own
+/// `MaxHeap::Node` at heap creation. Both sides derive their field types from
+/// the same generated config, but they are compiled by different toolchains,
+/// and a silent disagreement here would corrupt the queue rather than fail.
+///
+/// # Safety
+/// All five out-pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_maxheap_node_layout(
+    size: *mut FwSizeType,
+    align: *mut FwSizeType,
+    value_offset: *mut FwSizeType,
+    order_offset: *mut FwSizeType,
+    id_offset: *mut FwSizeType,
+) {
+    let probe = Node {
+        value: 0,
+        order: 0,
+        id: 0,
+    };
+    let base = core::ptr::addr_of!(probe) as usize;
+    // SAFETY: the caller guarantees all five pointers are valid.
+    unsafe {
+        *size = core::mem::size_of::<Node>() as FwSizeType;
+        *align = core::mem::align_of::<Node>() as FwSizeType;
+        *value_offset = (core::ptr::addr_of!(probe.value) as usize - base) as FwSizeType;
+        *order_offset = (core::ptr::addr_of!(probe.order) as usize - base) as FwSizeType;
+        *id_offset = (core::ptr::addr_of!(probe.id) as usize - base) as FwSizeType;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Os::FilePathUtils (Phase 9)
+// ---------------------------------------------------------------------------
+//
+// Path resolution and sandbox containment: the code that decides whether a
+// path a spacecraft was told to open stays inside the directory it is allowed
+// to touch. No filesystem access, no syscalls -- purely character arithmetic,
+// which is why it is worth moving and why `Os::SandboxedFile` depends on it
+// being right.
+
+use fprime_utils::path;
+
+/// Length of a NUL-terminated C string, scanning at most `limit` bytes.
+///
+/// Scans byte by byte rather than materializing a `limit`-long slice: the
+/// caller's string may be shorter than `limit`, and a slice spanning past its
+/// allocation is UB even if nothing reads that far. The C++ this mirrors is
+/// `Fw::StringUtils::string_length`, which has the same stop-at-NUL bound.
+///
+/// # Safety
+/// `ptr` must be readable up to and including its NUL terminator, or for
+/// `limit` bytes if it has none.
+unsafe fn c_str_len(ptr: *const u8, limit: usize) -> Option<usize> {
+    (0..limit).find(|&i| {
+        // SAFETY: the caller guarantees bytes up to the terminator, and the
+        // search stops at the first NUL.
+        unsafe { *ptr.add(i) == 0 }
+    })
+}
+
+/// Borrow a C string including its terminator, or `None` if it is null or
+/// runs past `limit` without one.
+///
+/// # Safety
+/// As [`c_str_len`].
+unsafe fn c_str<'a>(ptr: *const u8, limit: usize) -> Option<&'a [u8]> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: forwarded from the caller.
+    let len = unsafe { c_str_len(ptr, limit) }?;
+    // SAFETY: `len + 1` bytes are readable -- the string and its terminator.
+    Some(unsafe { core::slice::from_raw_parts(ptr, len + 1) })
+}
+
+/// `Os::FilePathUtils::resolvePath(const char*, const char*, char*, FwSizeType)`.
+///
+/// Returns an `Os::FilePathUtils::Status` integer value. `base` may be null,
+/// which is a caller error only when `path` is relative.
+///
+/// # Safety
+/// `path` and, when non-null, `base` must be NUL-terminated within
+/// `max_path`; `out` must point to `out_size` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_path_resolve(
+    path: *const u8,
+    base: *const u8,
+    out: *mut u8,
+    out_size: FwSizeType,
+    max_path: FwSizeType,
+) -> i32 {
+    let limit = max_path as usize;
+    // An unterminated or null path is a malformed path, which is exactly what
+    // the C++ reports for it.
+    // SAFETY: the caller guarantees the strings are terminated within `limit`.
+    let Some(path) = (unsafe { c_str(path, limit) }) else {
+        return path::Status::InvalidPath.code();
+    };
+    // SAFETY: as above; a null base is legitimate for an absolute path.
+    let base = unsafe { c_str(base, limit) };
+    assert!(!out.is_null(), "resolvePath output buffer is null");
+    // SAFETY: the caller guarantees `out_size` writable bytes at `out`.
+    let out = unsafe { view_mut(out, out_size as usize) };
+    path::resolve_path(path, base, out, max_path).code()
+}
+
+/// `Os::FilePathUtils::checkContainment(const char*, const char*)`.
+///
+/// # Safety
+/// Both strings must be NUL-terminated within `max_path`.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_path_check_containment(
+    resolved: *const u8,
+    allowed: *const u8,
+    max_path: FwSizeType,
+) -> i32 {
+    let limit = max_path as usize;
+    // SAFETY: the caller guarantees the strings are terminated within `limit`.
+    let (Some(resolved), Some(allowed)) = (unsafe { c_str(resolved, limit) }, unsafe {
+        c_str(allowed, limit)
+    }) else {
+        return path::Status::InvalidPath.code();
+    };
+    path::check_containment(resolved, allowed, max_path).code()
+}

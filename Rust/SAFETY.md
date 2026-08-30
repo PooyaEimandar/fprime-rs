@@ -117,6 +117,25 @@ All unsafe code is confined to two places, both by design:
   overlap-tolerant per-byte copies matching the C++ loops they mirror, and a
   strided view over a C++-resident entry array.
 
+The Phase 9 OSAL work adds **one** new unsafe pattern: `c_str`/`c_str_len` in
+`fprime-ffi` take a C string whose length the caller does not pass, scan it
+byte by byte for the terminator, and only then build a slice of the length
+found. The scan is deliberately not a slice: the caller's string may be
+shorter than the `max_path` bound, and a slice spanning past its allocation
+is UB even if nothing reads that far. An unterminated string within the bound
+is reported as a malformed path rather than scanned past, which is what the
+C++ `Fw::StringUtils::string_length` bound does.
+
+Otherwise `max_heap` and `path` are safe modules in `fprime-utils`, and their
+FFI wrappers build a slice over caller-provided storage exactly as the Phase 8
+scalar entries do. The one
+thing worth naming is that `MaxHeap`'s node array is allocated and indexed by
+C++ as well as Rust, so the two `Node` layouts must agree: the Rust side
+reports its own through `fprime_rs_maxheap_node_layout`, and the generated
+shim asserts size, alignment and every field offset against the C++ `Node` at
+heap creation. A disagreement would corrupt a queue silently rather than
+fail, which is why it is checked rather than assumed.
+
 The pure-logic crates (`fprime-config`, `fprime-core`, and the rest of
 `fprime-utils`/`fprime-svc`) contain no unsafe code.
 
@@ -134,7 +153,19 @@ operation allows:
   `min(m_serLoc, m_capacity)` bytes — a read can never reach past the write
   high-water mark, so the borrow must not span past it either.
 
-Both assert the buffer is non-null whenever the borrow is non-empty, keeping
+The **bulk** entry points (`fprime_rs_lbb_ser_bytes`, `deser_bytes`,
+`set_buff`, `copy_bytes`) build no slice at all. They cannot: the C++ contract
+explicitly permits the source of a bulk serialize to overlap the destination,
+and two aliasing Rust slices are UB regardless of what is read. So they take
+raw pointers, make the bounds decision in safe code
+(`fprime_core::plan_bulk_read`/`plan_bulk_write`, with checked arithmetic
+where the C++ expression can wrap), and then perform one `core::ptr::copy`.
+`copy` has memmove semantics throughout, including where the mirrored C++ used
+`memcpy` — a superset, so these are defined wherever the original was, and
+defined in the overlapping case where it was not. That is a deliberate,
+one-directional divergence: no call that was well-defined changes behavior.
+
+Both kinds assert the buffer is non-null whenever they will touch it, keeping
 the `FW_ASSERT(buffAddr != nullptr)` that each C++ primitive performed. What
 neither can check is a `capacity` that overstates the real allocation: no
 guard exists on either side of the boundary, and `Fw::Buffer::deserializeFrom`
@@ -143,6 +174,25 @@ pre-existing framework exposure, not one this kernel introduces — but under
 the C++ kernel it was an out-of-bounds *access* that ASan catches, and here it
 is UB at slice construction, which ASan does not see. Weigh that before
 enabling `FPRIME_RUST_IMPL_FW_TYPES` (it is OFF by default).
+
+### Borrowing uninitialized storage
+
+A second, more pervasive deviation, and one that applies to every phase rather
+than only to Phase 8: the buffers C++ hands across are routinely
+**uninitialized**. `Fw::ExternalSerializeBuffer` is constructed over a raw
+`U8[N]`, and `Os::FilePathUtils::resolvePath` writes into a bare
+`char resolvedOut[MAX_PATH_LENGTH]`. Forming a `&mut [u8]` over uninitialized
+bytes is UB under Rust's current memory model even though `u8` has no invalid
+bit patterns, and the write-side helpers here do exactly that.
+
+This is not a case where the C++ is safer -- the same memory is equally
+uninitialized on that side, and it is what the API is for. It is called out
+because it is the kind of thing a qualification review would ask about, and
+because the honest answer is that the pattern is relied on rather than
+avoided. Avoiding it would mean the write paths taking `*mut u8` and using
+`ptr::write` throughout, which would move them out of safe Rust entirely and
+give up the bounds checking that is the reason for the port. The trade is
+deliberate; it is recorded here rather than left implicit.
 
 ## Reading a Rust-side fault in telemetry
 
