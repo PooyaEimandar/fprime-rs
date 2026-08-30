@@ -494,14 +494,48 @@ Phases 1–9 verifiable and Phase 10 not.
       criterion — "one real in-tree component with a command and a channel
       runs its logic in Rust, its own suite green" — is **not** met.
 
-- [ ] **Phase 14 — `Fw` core types in Rust** *(weeks)*. What Phase 8 claimed
-      and did not deliver: `Fw::Buffer`, the string types, `Fw::Time`,
-      `PolyType`, and the Com/Cmd/Tlm/Log packet types as canonical Rust, with
-      C++ consuming them. ~15,890 hand-written lines, plus the ~53,015-line
-      Enum/Serializable/Array/Constants tier that Phase 4 already showed is
-      mechanical.
-      **Exit:** `Fw`'s data types are Rust; the C++ definitions are wrappers.
-      **Oracle:** the `Fw` unit-test suites, plus the existing differential UT.
+- [~] **Phase 14 — partial: `Fw::Time`'s arithmetic.** Every timestamp the
+      framework stamps on an event, a telemetry sample or a data product is
+      ordered and offset by this code, and all of it is carry/borrow
+      arithmetic on a (seconds, microseconds) pair. Comparison, addition,
+      subtraction and the floating-point split now run in
+      `Rust/fprime-core/src/time.rs`; the class, its storage, its
+      serialization and its accessors stay C++. `Fw::Time` cannot cross
+      `extern "C"` — it derives `Fw::Serializable` and so has a vtable — so
+      each body flattens the object into a four-field `repr(C)` struct, calls
+      across, and reads the result back. `Fw/Time/TimeRust.cpp` is generated
+      by `tools/fprime-rs/gen_fw_time.py`, with the same drift check as the
+      other shims. Oracle: `Fw/Time`'s own suite, 15/15.
+
+      **The guard earned its keep immediately.** I assumed `Fw::TimeComparison`
+      numbered from zero; it is `LT = -1, EQ = 0, GT = 1, INCOMPARABLE = 2` —
+      a C-style comparison result. The `static_assert`s the shim emits caught
+      it at compile time. Without them every time comparison in the framework
+      would have been silently inverted, which no test of Rust alone would
+      have found. The existing suite then caught a second one: I had written
+      in a comment that `Time::add` keeps the left operand's context, when it
+      zeroes a mismatch exactly as `sub` does.
+
+      Two consequences worth recording. `parseSeconds`/`parseUSeconds` are
+      public statics whose contract is the *un-carried* rounded pair —
+      `parseUSeconds(0.999…)` is specified to return 1,000,000 — so the Rust
+      split does not carry, and the callers (`set(F64)`, `add(F64)`) carry as
+      the C++ does. And because the implementation file is renamed,
+      `FW_FILENAME_ASSERT` (the default) reports `TimeRust.cpp` rather than
+      `Time.cpp`; the suite's death tests pinned that path, and now accept
+      either. Under the file-ID and relative-path assert modes the CMake
+      restores the original's identity outright, so a flight fault signature is
+      unchanged there.
+
+      **What this is not.** The phase's goal — `Fw::Buffer`, the string types,
+      `PolyType`, and the Com/Cmd/Tlm/Log packet types as canonical Rust — is
+      barely started. `Fw::Time` is 273 lines of the roughly 15,890 that goal
+      covers, and only its arithmetic moved. `Fw::Buffer` (250 lines),
+      `PolyType` (654), `StringBase`/`StringUtils` (276) and the four packet
+      types (344) are all untouched, and the ~53,015-line
+      Enum/Serializable/Array/Constants tier that Phase 4 showed is mechanical
+      has not been generated for real types. This was a sitting; the phase is
+      sized in weeks and that estimate still stands.
 
 - [ ] **Phase 15 — The OSAL syscall layer** *(weeks)*. `Os::File`,
       `FileSystem`, `Directory`, `Task`, `Mutex`, `Queue`, `RawTime` in Rust

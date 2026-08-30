@@ -52,6 +52,11 @@ option(FPRIME_RUST_IMPL_OS_MAXHEAP "Use the Rust MaxHeap behind the OSAL priorit
 # commanded file path inside the directory a deployment allows.
 option(FPRIME_RUST_IMPL_OS_FILEPATH "Use the Rust path resolution and containment checks" ON)
 
+# Phase 14, the Fw core types: the arithmetic behind Fw::Time -- ordering, the
+# carry on addition, the borrow on subtraction, and the F64 split. Bounded
+# per-call work on a type every timestamp goes through.
+option(FPRIME_RUST_IMPL_FW_TIME "Use the Rust Fw::Time arithmetic" ON)
+
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH
 # (the fprime venv provides it). Must be registered before module detection.

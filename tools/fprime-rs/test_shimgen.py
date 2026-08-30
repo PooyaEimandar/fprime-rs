@@ -26,6 +26,7 @@ import shimgen
 from shimgen import REPO
 
 import gen_fw_kernel
+import gen_fw_time
 import gen_os_filepath
 import gen_os_maxheap
 
@@ -66,6 +67,25 @@ CASES = [
                 "    if (this->m_capacity < length) {",
                 "SerializeStatus LinearBufferBase::setBuffLen(Serializable::SizeType length) {\n"
                 "    if (this->m_capacity < length + 1) {",
+                False,
+            ),
+        ],
+    ),
+    (
+        gen_fw_time.SHIM,
+        [
+            (
+                "upstream edit inside a replaced body (compare)",
+                "source",
+                "return TimeComparison::INCOMPARABLE;",
+                "return TimeComparison::EQ;",
+                False,
+            ),
+            (
+                "upstream edit outside every replaced body",
+                "source",
+                "this->m_val.set_timeBase(timeBase);",
+                "this->m_val.set_timeBase(TimeBase::TB_NONE);",
                 False,
             ),
         ],

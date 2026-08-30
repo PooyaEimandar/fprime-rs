@@ -9,6 +9,7 @@ on:
       # Phases 8 and 9: an upstream edit to a file a generated shim mirrors
       # must re-run its --check, or the Rust-backed copy diverges silently
       - "Fw/Types/**"
+      - "Fw/Time/**"
       - "Os/FilePathUtils*"
       - "Os/SandboxedFile.cpp"
       - "Os/Generic/**"
@@ -40,6 +41,7 @@ on:
       # Phases 8 and 9: an upstream edit to a file a generated shim mirrors
       # must re-run its --check, or the Rust-backed copy diverges silently
       - "Fw/Types/**"
+      - "Fw/Time/**"
       - "Os/FilePathUtils*"
       - "Os/SandboxedFile.cpp"
       - "Os/Generic/**"
@@ -127,6 +129,7 @@ jobs:
           python3 tools/fprime-rs/gen_fw_kernel.py --check
           python3 tools/fprime-rs/gen_os_maxheap.py --check
           python3 tools/fprime-rs/gen_os_filepath.py --check
+          python3 tools/fprime-rs/gen_fw_time.py --check
       - name: The drift check itself still catches drift
         # Every --check above runs against a pristine tree, so it only ever
         # exercises the pass path. This mutates copies and asserts that real
@@ -265,7 +268,7 @@ jobs:
           . fprime-venv/bin/activate
           CACHE="$PWD/build-rust-off"
           fprime-util generate --ut --build-cache "$CACHE" -DFPRIME_ENABLE_RUST=OFF
-          for dir in Fw/Types Os Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
+          for dir in Fw/Types Fw/Time Os Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
                      Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator \
                      Svc/FprimeRouter Svc/ComQueue; do
             (cd "$dir" && fprime-util build --ut --build-cache "$CACHE" -j4)
@@ -273,6 +276,6 @@ jobs:
       - name: Check Rust-backed modules
         run: |
           . fprime-venv/bin/activate
-          for dir in Rust Fw/Types Os Os/Generic Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
+          for dir in Rust Fw/Types Fw/Time Os Os/Generic Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
             (cd "$dir" && fprime-util check -j4)
           done

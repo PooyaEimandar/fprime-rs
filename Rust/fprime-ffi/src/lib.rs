@@ -1653,3 +1653,173 @@ pub unsafe extern "C" fn fprime_rs_path_check_containment(
     };
     path::check_containment(resolved, allowed, max_path).code()
 }
+
+// ---------------------------------------------------------------------------
+// Fw::Time arithmetic (Phase 14)
+// ---------------------------------------------------------------------------
+//
+// Every timestamp the framework stamps on an event, a telemetry sample or a
+// data product is ordered and offset by this code. `Fw::Time` derives
+// `Fw::Serializable`, so the object has a vtable and cannot cross -- but its
+// four fields are its whole state, and they cross as a repr(C) struct.
+//
+// Each entry returns a bool for "the C++ precondition held". The C++ asserts
+// on a base mismatch, on a subtrahend larger than its minuend, and on a
+// microsecond sum that exceeds one carry; the shim turns a `false` back into
+// the same FW_ASSERT, so the fault surface is unchanged.
+
+use fprime_core::time::{self, Time as RsTime};
+
+/// `Fw::Time::compare`. Returns an `Fw::TimeComparison` integer value.
+///
+/// # Safety
+/// Both pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_time_compare(a: *const RsTime, b: *const RsTime) -> i32 {
+    assert!(
+        !a.is_null() && !b.is_null(),
+        "Fw::Time compare operand is null"
+    );
+    // SAFETY: non-null per the assert, and the caller owns both for the call.
+    let (a, b) = unsafe { (&*a, &*b) };
+    time::compare(a, b).code()
+}
+
+/// `Fw::Time::add`. False when the bases differ or the carry would exceed one
+/// second, both of which the C++ asserts on.
+///
+/// # Safety
+/// All three pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_time_add(
+    a: *const RsTime,
+    b: *const RsTime,
+    out: *mut RsTime,
+) -> bool {
+    assert!(
+        !a.is_null() && !b.is_null() && !out.is_null(),
+        "Fw::Time add operand is null"
+    );
+    // SAFETY: non-null per the assert.
+    let (a, b) = unsafe { (&*a, &*b) };
+    match time::add(a, b) {
+        Some(sum) => {
+            // SAFETY: as above.
+            unsafe { *out = sum };
+            true
+        }
+        None => false,
+    }
+}
+
+/// `Fw::Time::sub`. False when the bases differ or the subtrahend is larger.
+///
+/// # Safety
+/// All three pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_time_sub(
+    minuend: *const RsTime,
+    subtrahend: *const RsTime,
+    out: *mut RsTime,
+) -> bool {
+    assert!(
+        !minuend.is_null() && !subtrahend.is_null() && !out.is_null(),
+        "Fw::Time sub operand is null"
+    );
+    // SAFETY: non-null per the assert.
+    let (minuend, subtrahend) = unsafe { (&*minuend, &*subtrahend) };
+    match time::sub(minuend, subtrahend) {
+        Some(difference) => {
+            // SAFETY: as above.
+            unsafe { *out = difference };
+            true
+        }
+        None => false,
+    }
+}
+
+/// Normalize a (seconds, microseconds) pair that may carry one second.
+///
+/// # Safety
+/// Both out-pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_time_carry(
+    seconds: u32,
+    useconds: u32,
+    out_seconds: *mut u32,
+    out_useconds: *mut u32,
+) -> bool {
+    assert!(
+        !out_seconds.is_null() && !out_useconds.is_null(),
+        "Fw::Time carry output is null"
+    );
+    match time::carry(seconds, useconds) {
+        Some((s, us)) => {
+            // SAFETY: non-null per the assert.
+            unsafe {
+                *out_seconds = s;
+                *out_useconds = us;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Split a floating-point number of seconds. False for a negative input (and
+/// for NaN), which the C++ asserts on.
+///
+/// # Safety
+/// Both out-pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_time_from_f64(
+    seconds: f64,
+    out_seconds: *mut u32,
+    out_useconds: *mut u32,
+) -> bool {
+    assert!(
+        !out_seconds.is_null() && !out_useconds.is_null(),
+        "Fw::Time conversion output is null"
+    );
+    match time::from_f64(seconds) {
+        Some((s, us)) => {
+            // SAFETY: non-null per the assert.
+            unsafe {
+                *out_seconds = s;
+                *out_useconds = us;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Reports the Rust `Time` layout so the shim can pin it against the C++
+/// object's fields, the way the MaxHeap node layout is pinned.
+///
+/// # Safety
+/// All five out-pointers must be valid.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_time_layout(
+    size: *mut FwSizeType,
+    align: *mut FwSizeType,
+    base_offset: *mut FwSizeType,
+    seconds_offset: *mut FwSizeType,
+    useconds_offset: *mut FwSizeType,
+) {
+    let probe = RsTime {
+        time_base: 0,
+        context: 0,
+        seconds: 0,
+        useconds: 0,
+    };
+    let origin = core::ptr::addr_of!(probe) as usize;
+    // SAFETY: the caller guarantees all five pointers are valid.
+    unsafe {
+        *size = core::mem::size_of::<RsTime>() as FwSizeType;
+        *align = core::mem::align_of::<RsTime>() as FwSizeType;
+        *base_offset = (core::ptr::addr_of!(probe.time_base) as usize - origin) as FwSizeType;
+        *seconds_offset = (core::ptr::addr_of!(probe.seconds) as usize - origin) as FwSizeType;
+        *useconds_offset = (core::ptr::addr_of!(probe.useconds) as usize - origin) as FwSizeType;
+    }
+}

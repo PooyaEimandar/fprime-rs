@@ -159,12 +159,18 @@ void Fw::TimeTester::test_FloatOperations() {
     // Convert to F64
     EXPECT_EQ(static_cast<F64>(time), 1234.567890);
 
-    // Assert negative value
-    ASSERT_DEATH_IF_SUPPORTED(Fw::Time::parseSeconds(-1.0), "Assert:.*Time\\.cpp");
-    ASSERT_DEATH_IF_SUPPORTED(Fw::Time::parseUSeconds(-1.0), "Assert:.*Time\\.cpp");
-    ASSERT_DEATH_IF_SUPPORTED(time.add(-1.0), "Assert:.*Time\\.cpp");
-    ASSERT_DEATH_IF_SUPPORTED(time.operator=(-1.0), "Assert:.*Time\\.cpp");
-    ASSERT_DEATH_IF_SUPPORTED(time.operator+=(-1.0), "Assert:.*Time\\.cpp");
+    // Assert negative value.
+    //
+    // The pattern accepts TimeRust.cpp as well as Time.cpp: under
+    // FPRIME_RUST_IMPL_FW_TIME the implementation file is the generated shim,
+    // and FW_FILENAME_ASSERT (the default) reports __FILE__, so the assert
+    // names whichever file is actually compiled. What these pin is that the
+    // assert comes from the Fw::Time implementation, which both satisfy.
+    ASSERT_DEATH_IF_SUPPORTED(Fw::Time::parseSeconds(-1.0), "Assert:.*Time(Rust)?\\.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(Fw::Time::parseUSeconds(-1.0), "Assert:.*Time(Rust)?\\.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(time.add(-1.0), "Assert:.*Time(Rust)?\\.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(time.operator=(-1.0), "Assert:.*Time(Rust)?\\.cpp");
+    ASSERT_DEATH_IF_SUPPORTED(time.operator+=(-1.0), "Assert:.*Time(Rust)?\\.cpp");
 }
 
 void TimeTester::test_CopyTest() {
