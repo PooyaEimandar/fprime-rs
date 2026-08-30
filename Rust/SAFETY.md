@@ -119,3 +119,41 @@ All unsafe code is confined to two places, both by design:
 
 The pure-logic crates (`fprime-config`, `fprime-core`, and the rest of
 `fprime-utils`/`fprime-svc`) contain no unsafe code.
+
+### Borrow width at the FFI boundary
+
+Building a slice from a `(pointer, length)` pair asserts that the *whole*
+range is one live allocation, which is a stronger claim than the C++ it
+replaces makes — that only ever indexed the bytes it actually touched. The
+`Fw` kernel entry points (Phase 8) therefore borrow as narrowly as the
+operation allows:
+
+- writes (`fprime_rs_lbb_ser_*`) borrow `capacity` bytes mutably — that is
+  what `m_capacity` means, so the claim is the object's own invariant;
+- reads (`fprime_rs_lbb_deser_*`) take a `const` pointer and borrow only
+  `min(m_serLoc, m_capacity)` bytes — a read can never reach past the write
+  high-water mark, so the borrow must not span past it either.
+
+Both assert the buffer is non-null whenever the borrow is non-empty, keeping
+the `FW_ASSERT(buffAddr != nullptr)` that each C++ primitive performed. What
+neither can check is a `capacity` that overstates the real allocation: no
+guard exists on either side of the boundary, and `Fw::Buffer::deserializeFrom`
+takes a pointer and a size off the wire without validating them. That is a
+pre-existing framework exposure, not one this kernel introduces — but under
+the C++ kernel it was an out-of-bounds *access* that ASan catches, and here it
+is UB at slice construction, which ASan does not see. Weigh that before
+enabling `FPRIME_RUST_IMPL_FW_TYPES` (it is OFF by default).
+
+## Reading a Rust-side fault in telemetry
+
+A Rust panic is not a C++ `FW_ASSERT` and does not report like one. Every
+panic routes through `Rust/RustPanicHook.cpp`, so the assert's file identity
+is always `RustPanicHook.cpp` and its line is always the hook's — never the
+failing serialization site. The information identifying the real site is
+demoted to the **first assert argument**, which carries the line number
+within `Rust/fprime-ffi/src/lib.rs` (or whichever Rust file panicked).
+
+So `Assert: "Rust/RustPanicHook.cpp:19" 69` means *a Rust panic occurred at
+`fprime-ffi/src/lib.rs:69`*, not a fault in the hook. Operators and fault
+handlers keying on `ASSERT_FILE_ID` will see one identity for every Rust-side
+failure in the framework; the discriminator is the argument.

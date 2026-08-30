@@ -2,6 +2,15 @@
 # F prime CMakeLists.txt:
 ####
 include(global_interface)
+# fprime-rs Phase 8: the serialization kernel's primitives can run in Rust
+# (see Rust/enable.cmake). This is the framework's hottest path -- every
+# component and autocoded type serializes through it -- so it is switchable.
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_TYPES)
+    set(FW_SERIALIZABLE_IMPL "${CMAKE_CURRENT_LIST_DIR}/SerializableRust.cpp")
+else()
+    set(FW_SERIALIZABLE_IMPL "${CMAKE_CURRENT_LIST_DIR}/Serializable.cpp")
+endif()
+
 register_fprime_module(
     Fw_Types
   SOURCES
@@ -11,7 +20,7 @@ register_fprime_module(
     "${CMAKE_CURRENT_LIST_DIR}/MemAllocator.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/PolyType.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/SerialBuffer.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/Serializable.cpp"
+    "${FW_SERIALIZABLE_IMPL}"
     "${CMAKE_CURRENT_LIST_DIR}/StringBase.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/StringUtils.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/StringToNumber.cpp"
@@ -23,6 +32,33 @@ register_fprime_module(
     Fw_StringFormat
     Fw_StringScan
 )
+
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_TYPES AND NOT FPRIME_IS_SUB_BUILD)
+    # Fw_Types and the Rust staticlib are mutually dependent: the kernel calls
+    # into Rust, and the Rust panic hook calls FW_ASSERT back. Declaring the
+    # edge lets CMake repeat the archives on the link line. The back-edge
+    # (fprime_rust -> Rust_Codec) is declared in Rust/CMakeLists.txt, closing
+    # the cycle so the repetition also satisfies GNU ld's single pass.
+    target_link_libraries(Fw_Types PUBLIC fprime_rust)
+
+    # SerializableRust.cpp is a generated near-copy of Serializable.cpp. An
+    # upstream edit to the original would otherwise never reach the Rust
+    # build and the two would silently diverge, so verify on every build that
+    # the checked-in copy is still what the generator produces.
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/SerializableRust.verified"
+        COMMAND "${PYTHON}" "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_fw_kernel.py" "--check"
+        COMMAND "${CMAKE_COMMAND}" "-E" "touch" "${CMAKE_CURRENT_BINARY_DIR}/SerializableRust.verified"
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/Serializable.cpp"
+                "${CMAKE_CURRENT_LIST_DIR}/SerializableRust.cpp"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_fw_kernel.py"
+        COMMENT "[rust] Verifying the Rust-backed Fw kernel matches Serializable.cpp"
+        VERBATIM
+    )
+    add_custom_target(Fw_Types_rust_kernel_verify
+                      DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/SerializableRust.verified")
+    add_dependencies(Fw_Types Fw_Types_rust_kernel_verify)
+endif()
 
 register_fprime_implementation(
     Fw_StringFormat_snprintf

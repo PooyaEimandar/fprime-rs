@@ -28,6 +28,18 @@ option(FPRIME_RUST_IMPL_SVC_FPRIME_FRAMER "Use the Rust FprimeFramer logic" ON)
 option(FPRIME_RUST_IMPL_SVC_FRAME_ACCUMULATOR "Use the Rust FrameAccumulator orchestration" ON)
 option(FPRIME_RUST_IMPL_SVC_FPRIME_ROUTER "Use the Rust FprimeRouter context table" ON)
 option(FPRIME_RUST_IMPL_SVC_COM_QUEUE "Use the Rust ComQueue priority scheduling" ON)
+# Phase 8, the flip point: the Fw serialization kernel's primitive reads and
+# writes call into Rust. Every component and every autocoded type depends on
+# this path, so the switch exists to isolate it instantly if needed.
+#
+# Default OFF, unlike every switch above it. This is the only one that taxes
+# the whole framework rather than the module it names: each primitive becomes
+# a cross-language call the compiler cannot inline (measured +40-80% on a
+# multi-field serialize, and it makes FpConfig's FW_SERIALIZE_FORCE_INLINE_LBB
+# knob a no-op), and linking the Rust archive into Fw_Types adds ~300 KB to
+# every binary. Turn it on deliberately, per deployment, against a measured
+# budget -- see Rust/README.md, Phase 8.
+option(FPRIME_RUST_IMPL_FW_TYPES "Use the Rust-backed Fw serialization kernel" OFF)
 
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH

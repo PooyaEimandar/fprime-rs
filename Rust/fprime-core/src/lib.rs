@@ -560,3 +560,242 @@ mod tests {
         assert_eq!(buf.as_bytes(), &[0xFF, 0xFF]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Cursor API for the C++ Fw kernel (Phase 8)
+// ---------------------------------------------------------------------------
+//
+// Phases 0-7 had Rust mirror the C++ wire format. This inverts it: the C++
+// `Fw::LinearBufferBase` keeps its class, its storage and its cursors, but
+// hands them here for every primitive read and write. The cursors stay in the
+// C++ object because every other method in that class touches them; only the
+// byte-level work moves.
+//
+// The semantics reproduced here are `Fw::LinearBufferBase`'s, quirks included:
+// a successful write resets the read cursor, a fully-drained buffer reports
+// BUFFER_EMPTY while a short one reports SIZE_MISMATCH.
+
+/// A `LinearBufferBase`'s state, borrowed for one operation.
+pub struct Cursor<'a> {
+    /// The object's storage
+    pub data: &'a mut [u8],
+    /// Bytes written so far (`m_serLoc`)
+    pub ser_loc: &'a mut FwSizeType,
+    /// Read position (`m_deserLoc`)
+    pub deser_loc: &'a mut FwSizeType,
+}
+
+impl Cursor<'_> {
+    fn write(&mut self, bytes: &[u8]) -> SerResult {
+        let at = *self.ser_loc as usize;
+        if at + bytes.len() > self.data.len() {
+            return Err(SerError::NoRoomLeft);
+        }
+        self.data[at..at + bytes.len()].copy_from_slice(bytes);
+        *self.ser_loc += bytes.len() as FwSizeType;
+        // A write rewinds the read cursor, as the C++ does.
+        *self.deser_loc = 0;
+        Ok(())
+    }
+
+    fn reader(&mut self) -> Reader<'_> {
+        let written = (*self.ser_loc as usize).min(self.data.len());
+        Reader {
+            data: &self.data[..written],
+            deser_loc: self.deser_loc,
+        }
+    }
+
+    /// Mirrors `serializeFrom(U8)`.
+    pub fn ser_u8(&mut self, value: u8) -> SerResult {
+        self.write(&[value])
+    }
+
+    /// Mirrors `deserializeTo(U8&)`.
+    pub fn deser_u8(&mut self) -> SerResult<u8> {
+        self.reader().deser_u8()
+    }
+
+    /// Mirrors `serializeFrom(bool)`: the configured wire values, not 0/1.
+    pub fn ser_bool(&mut self, value: bool) -> SerResult {
+        self.write(&[if value {
+            FW_SERIALIZE_TRUE_VALUE
+        } else {
+            FW_SERIALIZE_FALSE_VALUE
+        }])
+    }
+
+    /// Mirrors `deserializeTo(bool&)`, which rejects any other byte.
+    pub fn deser_bool(&mut self) -> SerResult<bool> {
+        self.reader().deser_bool()
+    }
+}
+
+/// The read half of a [`Cursor`]: a shared borrow of exactly the bytes that
+/// have been written (`m_serLoc`), never the whole capacity.
+///
+/// Deserialization cannot touch a byte past the write high-water mark, so it
+/// must not *borrow* one either — a mutable borrow of the full capacity would
+/// impose a stronger precondition on the C++ caller than the code it replaced.
+pub struct Reader<'a> {
+    /// The written region: `data.len()` is the C++ `m_serLoc`
+    pub data: &'a [u8],
+    /// Read position (`m_deserLoc`)
+    pub deser_loc: &'a mut FwSizeType,
+}
+
+impl Reader<'_> {
+    /// Bytes left to read, or `None` if the cursors are inconsistent.
+    fn available(&self) -> Option<usize> {
+        self.data.len().checked_sub(*self.deser_loc as usize)
+    }
+
+    fn read<const N: usize>(&mut self) -> SerResult<[u8; N]> {
+        // C++ lets `m_deserLoc > m_serLoc` wrap and then reads out of bounds;
+        // report a size mismatch instead. The framework asserts the invariant
+        // elsewhere, so this state is unreachable in a well-formed object.
+        let available = self.available().ok_or(SerError::SizeMismatch)?;
+        if available == 0 {
+            return Err(SerError::BufferEmpty);
+        }
+        if available < N {
+            return Err(SerError::SizeMismatch);
+        }
+        let at = *self.deser_loc as usize;
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.data[at..at + N]);
+        *self.deser_loc += N as FwSizeType;
+        Ok(out)
+    }
+
+    /// Mirrors `deserializeTo(U8&)`.
+    pub fn deser_u8(&mut self) -> SerResult<u8> {
+        Ok(self.read::<1>()?[0])
+    }
+
+    /// Mirrors `deserializeTo(bool&)`, which rejects any other byte.
+    pub fn deser_bool(&mut self) -> SerResult<bool> {
+        // Validate before advancing, as the C++ does: a bad byte leaves the
+        // read cursor where it was.
+        let available = self.available().ok_or(SerError::SizeMismatch)?;
+        if available == 0 {
+            return Err(SerError::BufferEmpty);
+        }
+        let value = match self.data[*self.deser_loc as usize] {
+            FW_SERIALIZE_TRUE_VALUE => true,
+            FW_SERIALIZE_FALSE_VALUE => false,
+            _ => return Err(SerError::DeserFormatError),
+        };
+        *self.deser_loc += 1;
+        Ok(value)
+    }
+}
+
+macro_rules! cursor_int {
+    ($ser:ident, $deser:ident, $ty:ty) => {
+        impl Cursor<'_> {
+            #[doc = concat!("Mirrors `serializeFrom(", stringify!($ty), ")`.")]
+            pub fn $ser(&mut self, value: $ty, mode: Endianness) -> SerResult {
+                match mode {
+                    Endianness::Big => self.write(&value.to_be_bytes()),
+                    Endianness::Little => self.write(&value.to_le_bytes()),
+                }
+            }
+            #[doc = concat!("Mirrors `deserializeTo(", stringify!($ty), "&)`.")]
+            pub fn $deser(&mut self, mode: Endianness) -> SerResult<$ty> {
+                self.reader().$deser(mode)
+            }
+        }
+        impl Reader<'_> {
+            #[doc = concat!("Mirrors `deserializeTo(", stringify!($ty), "&)`.")]
+            pub fn $deser(&mut self, mode: Endianness) -> SerResult<$ty> {
+                let raw = self.read::<{ core::mem::size_of::<$ty>() }>()?;
+                Ok(match mode {
+                    Endianness::Big => <$ty>::from_be_bytes(raw),
+                    Endianness::Little => <$ty>::from_le_bytes(raw),
+                })
+            }
+        }
+    };
+}
+
+cursor_int!(ser_u16, deser_u16, u16);
+cursor_int!(ser_u32, deser_u32, u32);
+cursor_int!(ser_u64, deser_u64, u64);
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn with<R>(
+        store: &mut [u8],
+        ser: &mut FwSizeType,
+        deser: &mut FwSizeType,
+        f: impl FnOnce(Cursor<'_>) -> R,
+    ) -> R {
+        f(Cursor {
+            data: store,
+            ser_loc: ser,
+            deser_loc: deser,
+        })
+    }
+
+    #[test]
+    fn writes_big_endian_and_advances() {
+        let mut store = [0u8; 8];
+        let (mut s, mut d) = (0, 0);
+        with(&mut store, &mut s, &mut d, |mut c| {
+            c.ser_u32(0x0102_0304, Endianness::Big).unwrap()
+        });
+        assert_eq!(&store[..4], &[1, 2, 3, 4]);
+        assert_eq!(s, 4);
+    }
+
+    #[test]
+    fn write_rewinds_the_read_cursor() {
+        let mut store = [0u8; 8];
+        let (mut s, mut d) = (4, 2);
+        with(&mut store, &mut s, &mut d, |mut c| c.ser_u8(9).unwrap());
+        assert_eq!(d, 0, "a write must rewind the read cursor");
+    }
+
+    #[test]
+    fn distinguishes_empty_from_short() {
+        let mut store = [0u8; 8];
+        let (mut s, mut d) = (0, 0);
+        assert_eq!(
+            with(&mut store, &mut s, &mut d, |mut c| c
+                .deser_u32(Endianness::Big)),
+            Err(SerError::BufferEmpty)
+        );
+        s = 2;
+        assert_eq!(
+            with(&mut store, &mut s, &mut d, |mut c| c
+                .deser_u32(Endianness::Big)),
+            Err(SerError::SizeMismatch)
+        );
+    }
+
+    #[test]
+    fn bad_bool_leaves_the_cursor_alone() {
+        let mut store = [0x42u8; 1];
+        let (mut s, mut d) = (1, 0);
+        assert_eq!(
+            with(&mut store, &mut s, &mut d, |mut c| c.deser_bool()),
+            Err(SerError::DeserFormatError)
+        );
+        assert_eq!(d, 0);
+    }
+
+    #[test]
+    fn no_room_left_leaves_state_untouched() {
+        let mut store = [0u8; 3];
+        let (mut s, mut d) = (0, 0);
+        assert_eq!(
+            with(&mut store, &mut s, &mut d, |mut c| c
+                .ser_u32(1, Endianness::Big)),
+            Err(SerError::NoRoomLeft)
+        );
+        assert_eq!(s, 0);
+    }
+}

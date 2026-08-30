@@ -1045,3 +1045,230 @@ pub extern "C" fn fprime_rs_rustdemo_instance() -> *const core::ffi::c_void {
 pub extern "C" fn fprime_rs_rustdemo_total() -> u32 {
     RUST_DEMO.total()
 }
+
+// ---------------------------------------------------------------------------
+// Fw::LinearBufferBase primitive kernel (Phase 8)
+// ---------------------------------------------------------------------------
+// The flip: C++ Fw calls these for every primitive read and write, instead of
+// Rust mirroring what C++ does. The C++ object still owns its storage and its
+// cursors and passes them in; only the byte-level work happens here.
+//
+// Signed and floating-point types are NOT exposed: the C++ kernel routes them
+// through the unsigned primitives below, so these ten entry points carry every
+// serialization in the framework.
+
+use fprime_core::{Cursor, Reader};
+
+/// Borrow a C++ LinearBufferBase's state for one operation.
+///
+/// # Safety
+/// `data` must point to `capacity` writable bytes; `ser_loc` and `deser_loc`
+/// must be valid pointers to the object's cursors, distinct from the storage.
+unsafe fn cursor<'a>(
+    data: *mut u8,
+    capacity: FwSizeType,
+    ser_loc: *mut FwSizeType,
+    deser_loc: *mut FwSizeType,
+) -> Cursor<'a> {
+    // The C++ primitives each asserted `buffAddr != nullptr` before touching
+    // storage; keep that defense here, or a null pointer with a non-zero
+    // capacity would become UB instead of an assert. `ExternalSerializeBuffer`
+    // already rejects that pairing in `setExtBuffer`, so this is unreachable
+    // in a well-formed object -- which is exactly why it is worth asserting.
+    assert!(
+        !data.is_null() || capacity == 0,
+        "LinearBufferBase storage is null with non-zero capacity"
+    );
+    Cursor {
+        // SAFETY: `capacity` writable bytes at `data`, non-null per the assert.
+        data: unsafe { view_mut(data, capacity as usize) },
+        // SAFETY: the caller guarantees these point at the object's cursors.
+        ser_loc: unsafe { &mut *ser_loc },
+        // SAFETY: as above.
+        deser_loc: unsafe { &mut *deser_loc },
+    }
+}
+
+/// Borrow a C++ LinearBufferBase's state for one *read*.
+///
+/// The borrow spans only the written region (`ser_loc`), never the whole
+/// capacity, and is shared rather than mutable: `deserializeTo` never writes
+/// storage, so requiring the full capacity to be one live allocation would
+/// impose a stronger precondition than the C++ this replaces.
+///
+/// # Safety
+/// `data` must point to at least `min(*ser_loc, capacity)` readable bytes;
+/// `ser_loc` and `deser_loc` must be valid pointers to the object's cursors,
+/// distinct from the storage.
+unsafe fn reader<'a>(
+    data: *const u8,
+    capacity: FwSizeType,
+    ser_loc: *const FwSizeType,
+    deser_loc: *mut FwSizeType,
+) -> Reader<'a> {
+    // SAFETY: the caller guarantees this points at the object's write cursor.
+    let written = unsafe { *ser_loc }.min(capacity) as usize;
+    // As in `cursor`: the C++ primitives asserted a non-null buffer before
+    // touching storage, and a null pointer with bytes to read is UB.
+    assert!(
+        !data.is_null() || written == 0,
+        "LinearBufferBase storage is null with bytes written"
+    );
+    Reader {
+        // SAFETY: `written` readable bytes at `data`, non-null per the assert.
+        data: unsafe { view(data, written) },
+        // SAFETY: the caller guarantees this points at the object's read cursor.
+        deser_loc: unsafe { &mut *deser_loc },
+    }
+}
+
+macro_rules! lbb_int {
+    ($ser_name:ident, $deser_name:ident, $ser:ident, $deser:ident, $ty:ty) => {
+        /// Mirrors `Fw::LinearBufferBase::serializeFrom` for this type.
+        ///
+        /// # Safety
+        /// See [`cursor`].
+        #[no_mangle]
+        pub unsafe extern "C" fn $ser_name(
+            data: *mut u8,
+            capacity: FwSizeType,
+            ser_loc: *mut FwSizeType,
+            deser_loc: *mut FwSizeType,
+            value: $ty,
+            mode: i32,
+        ) -> i32 {
+            // SAFETY: forwarded from the C++ object that owns this state.
+            let mut cursor = unsafe { cursor(data, capacity, ser_loc, deser_loc) };
+            status_code(&cursor.$ser(value, endianness(mode)))
+        }
+
+        /// Mirrors `Fw::LinearBufferBase::deserializeTo` for this type.
+        ///
+        /// # Safety
+        /// See [`reader`]; `value` must be a valid pointer.
+        #[no_mangle]
+        pub unsafe extern "C" fn $deser_name(
+            data: *const u8,
+            capacity: FwSizeType,
+            ser_loc: *const FwSizeType,
+            deser_loc: *mut FwSizeType,
+            value: *mut $ty,
+            mode: i32,
+        ) -> i32 {
+            // SAFETY: forwarded from the C++ object that owns this state.
+            let mut reader = unsafe { reader(data, capacity, ser_loc, deser_loc) };
+            match reader.$deser(endianness(mode)) {
+                Ok(read) => {
+                    // SAFETY: the caller guarantees `value` is valid.
+                    unsafe { *value = read };
+                    0
+                }
+                Err(e) => e.code(),
+            }
+        }
+    };
+}
+
+lbb_int!(
+    fprime_rs_lbb_ser_u16,
+    fprime_rs_lbb_deser_u16,
+    ser_u16,
+    deser_u16,
+    u16
+);
+lbb_int!(
+    fprime_rs_lbb_ser_u32,
+    fprime_rs_lbb_deser_u32,
+    ser_u32,
+    deser_u32,
+    u32
+);
+lbb_int!(
+    fprime_rs_lbb_ser_u64,
+    fprime_rs_lbb_deser_u64,
+    ser_u64,
+    deser_u64,
+    u64
+);
+
+/// Mirrors `Fw::LinearBufferBase::serializeFrom(U8)`.
+///
+/// # Safety
+/// See [`cursor`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_ser_u8(
+    data: *mut u8,
+    capacity: FwSizeType,
+    ser_loc: *mut FwSizeType,
+    deser_loc: *mut FwSizeType,
+    value: u8,
+) -> i32 {
+    // SAFETY: forwarded from the C++ object that owns this state.
+    let mut cursor = unsafe { cursor(data, capacity, ser_loc, deser_loc) };
+    status_code(&cursor.ser_u8(value))
+}
+
+/// Mirrors `Fw::LinearBufferBase::deserializeTo(U8&)`.
+///
+/// # Safety
+/// See [`reader`]; `value` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_deser_u8(
+    data: *const u8,
+    capacity: FwSizeType,
+    ser_loc: *const FwSizeType,
+    deser_loc: *mut FwSizeType,
+    value: *mut u8,
+) -> i32 {
+    // SAFETY: forwarded from the C++ object that owns this state.
+    let mut reader = unsafe { reader(data, capacity, ser_loc, deser_loc) };
+    match reader.deser_u8() {
+        Ok(read) => {
+            // SAFETY: the caller guarantees `value` is valid.
+            unsafe { *value = read };
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Mirrors `Fw::LinearBufferBase::serializeFrom(bool)`.
+///
+/// # Safety
+/// See [`cursor`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_ser_bool(
+    data: *mut u8,
+    capacity: FwSizeType,
+    ser_loc: *mut FwSizeType,
+    deser_loc: *mut FwSizeType,
+    value: bool,
+) -> i32 {
+    // SAFETY: forwarded from the C++ object that owns this state.
+    let mut cursor = unsafe { cursor(data, capacity, ser_loc, deser_loc) };
+    status_code(&cursor.ser_bool(value))
+}
+
+/// Mirrors `Fw::LinearBufferBase::deserializeTo(bool&)`.
+///
+/// # Safety
+/// See [`reader`]; `value` must be a valid pointer.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_lbb_deser_bool(
+    data: *const u8,
+    capacity: FwSizeType,
+    ser_loc: *const FwSizeType,
+    deser_loc: *mut FwSizeType,
+    value: *mut bool,
+) -> i32 {
+    // SAFETY: forwarded from the C++ object that owns this state.
+    let mut reader = unsafe { reader(data, capacity, ser_loc, deser_loc) };
+    match reader.deser_bool() {
+        Ok(read) => {
+            // SAFETY: the caller guarantees `value` is valid.
+            unsafe { *value = read };
+            0
+        }
+        Err(e) => e.code(),
+    }
+}

@@ -21,8 +21,14 @@ if (NOT FPRIME_IS_SUB_BUILD)
     target_link_libraries(Rust_Codec PUBLIC fprime_rust)
     # libfprime_rust.a carries an undefined reference to fprime_rs_panic_hook,
     # defined in libRust_Codec.a — a mutual dependency between static archives.
-    # Declaring the back-edge makes CMake repeat the archives on the link line
-    # (macOS ld tolerates single-pass ordering; GNU ld does not).
+    # Declaring the back-edge closes the cycle, which CMake detects as a
+    # strongly connected component and repeats on the link line (verified:
+    # Fw_Types_ut_exe links ...Fw_Types fprime_rust Rust_Codec Fw_Types
+    # fprime_rust Rust_Codec...). That repetition is CMake's, so it is
+    # generator- and linker-independent — GNU ld resolves it in its single
+    # pass, not just macOS ld. Note the repeat count is LINK_INTERFACE_-
+    # MULTIPLICITY (default 1, i.e. two copies): a future back-edge from the
+    # Rust archive into a fourth library would need it raised.
     set_target_properties(fprime_rust PROPERTIES INTERFACE_LINK_LIBRARIES Rust_Codec)
 endif()
 

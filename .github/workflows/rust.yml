@@ -6,6 +6,9 @@ on:
     paths:
       - "Rust/**"
       - "tools/fprime-rs/**"
+      # Phase 8: an upstream edit here must re-run gen_fw_kernel.py --check,
+      # otherwise the Rust-backed kernel silently diverges from the original
+      - "Fw/Types/**"
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
@@ -28,6 +31,9 @@ on:
     paths:
       - "Rust/**"
       - "tools/fprime-rs/**"
+      # Phase 8: an upstream edit here must re-run gen_fw_kernel.py --check,
+      # otherwise the Rust-backed kernel silently diverges from the original
+      - "Fw/Types/**"
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
@@ -87,10 +93,17 @@ jobs:
             --out-cpp /tmp/generated-check.cpp
           diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
           diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp
+      - name: Rust-backed Fw kernel matches Serializable.cpp
+        # Phase 8: SerializableRust.cpp is a generated near-copy of the
+        # upstream kernel. Catch an upstream edit that never reached it --
+        # otherwise the C++ and Rust kernels drift apart silently.
+        working-directory: .
+        run: python3 tools/fprime-rs/gen_fw_kernel.py --check
   framework-check:
     # Builds the C++ framework with the Rust implementations selected and runs
     # the affected unit-test suites (the equivalence oracles): the codec
-    # differential UT plus the CircularBuffer/Queue, CRC32, CFDP checksum,
+    # differential UT plus the Fw/Types suite (the oracle for the Phase 8
+    # serialization kernel), CircularBuffer/Queue, CRC32, CFDP checksum,
     # FprimeDeframer/FprimeFramer, FrameAccumulator (incl. detector tests),
     # FprimeRouter and ComQueue suites, plus the RustDemo component whose glue
     # is fully generated -- all against the Rust-backed modules, under
@@ -148,12 +161,15 @@ jobs:
         # FPRIME_RUST_AUTOCODE=ON exercises cmake/autocoder/rust.cmake, which
         # re-verifies the checked-in generated Rust against its model at build
         # time; without this the autocoder would be untested and would rot.
+        # FPRIME_RUST_IMPL_FW_TYPES defaults OFF (see Rust/enable.cmake), so
+        # it must be requested explicitly or the Phase 8 kernel — and the
+        # Fw/Types suite that is its oracle — would never be exercised here.
         run: |
           . fprime-venv/bin/activate
-          fprime-util generate --ut -DFPRIME_RUST_AUTOCODE=ON
+          fprime-util generate --ut -DFPRIME_RUST_AUTOCODE=ON -DFPRIME_RUST_IMPL_FW_TYPES=ON
       - name: Check Rust-backed modules
         run: |
           . fprime-venv/bin/activate
-          for dir in Rust Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
+          for dir in Rust Fw/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
             (cd "$dir" && fprime-util check -j4)
           done
