@@ -27,6 +27,7 @@ Usage:
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -741,6 +742,16 @@ def main():
     )
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument(
+        "--topology",
+        help="emit the resolved topology of this FPP topology as Rust data",
+    )
+    ap.add_argument(
+        "--verify-cpp",
+        type=Path,
+        help="topology mode: check the resolved facts against this generated "
+        "*TopologyAc.cpp",
+    )
+    ap.add_argument(
         "--modules",
         nargs="*",
         help="restrict generation to these top-level FPP modules",
@@ -755,6 +766,9 @@ def main():
             ast, analysis = run_fpp_to_json(args.sources, Path(tmp))
         if args.component:
             emit_component(ast, analysis, args)
+            return
+        if args.topology:
+            emit_topology(ast, analysis, args)
             return
         model = build_model(ast, analysis, args.modules)
         code = generate(model, args.module_name)
@@ -806,10 +820,54 @@ INPUT_KINDS = (PORT_KIND_SYNC, PORT_KIND_GUARDED, PORT_KIND_ASYNC)
 class Port:
     """One input port reduced to what the glue needs."""
 
-    def __init__(self, name, kind, params):
+    def __init__(self, name, kind, params, ret=None):
         self.name = name
         self.kind = kind
-        self.params = params  # [(param name, ("prim", rust, size) | ("bool",...))]
+        self.params = params  # [(param name, descriptor)]
+        self.ret = ret  # descriptor, or None for a void port
+
+
+class Event:
+    """One event the component can emit, which Rust reaches through the Env."""
+
+    def __init__(self, name, severity, params):
+        self.name = name
+        self.severity = severity
+        self.params = params
+
+    @property
+    def cpp_method(self):
+        """The autocoded base's emitter, e.g. log_WARNING_LO_Foo."""
+        return f"log_{SEVERITY_SUFFIX[self.severity]}_{self.name}"
+
+
+class Channel:
+    """One telemetry channel the component can write."""
+
+    def __init__(self, name, desc):
+        self.name = name
+        self.desc = desc
+
+
+class Command:
+    """One command the component answers."""
+
+    def __init__(self, name, kind, params):
+        self.name = name
+        self.kind = kind  # Sync, Guarded or Async
+        self.params = params
+
+
+#: FPP severity -> the infix the autocoded event emitter uses.
+SEVERITY_SUFFIX = {
+    "ActivityHigh": "ACTIVITY_HI",
+    "ActivityLow": "ACTIVITY_LO",
+    "Command": "COMMAND",
+    "Diagnostic": "DIAGNOSTIC",
+    "Fatal": "FATAL",
+    "WarningHigh": "WARNING_HI",
+    "WarningLow": "WARNING_LO",
+}
 
 
 def collect_ports(ast, analysis, component_name, where):
@@ -845,15 +903,142 @@ def collect_ports(ast, analysis, component_name, where):
         definition = port_defs.get(port_symbol["nodeId"])
         if definition is None:
             raise GeneratorError(f"{where}.{port_name}: port definition not found")
-        ports.append(
-            Port(
-                port_name,
-                kind,
-                port_params(definition, analysis, f"{where}.{port_name}"),
-            )
-        )
+        params, ret = port_signature(definition, analysis, f"{where}.{port_name}")
+        ports.append(Port(port_name, kind, params, ret))
     ports.sort(key=lambda port: port.name)
     return ports
+
+
+def collect_events(chosen_node_id, ast, analysis, where):
+    """Describe the events the component declares.
+
+    Rust reaches these through a generated Env vtable rather than by owning
+    the component: emitting an event needs the autocoded base's time port and
+    its event buffer, which stay on the C++ side.
+    """
+    events = []
+
+    def walk(node, inside):
+        if isinstance(node, dict):
+            if "DefComponent" in node:
+                data, this_id = unwrap(node["DefComponent"]["node"])
+                walk(data, this_id == chosen_node_id)
+                return
+            if inside and "SpecEvent" in node:
+                data, _ = unwrap(node["SpecEvent"]["node"])
+                severity = (
+                    next(iter(data["severity"]))
+                    if isinstance(data["severity"], dict)
+                    else data["severity"]
+                )
+                if severity not in SEVERITY_SUFFIX:
+                    raise GeneratorError(
+                        f"{where}.{data['name']}: unknown event severity {severity}"
+                    )
+                events.append(
+                    Event(
+                        data["name"],
+                        severity,
+                        spec_params(
+                            data["params"],
+                            analysis["typeMap"],
+                            f"{where}.{data['name']}",
+                        ),
+                    )
+                )
+                return
+            for value in node.values():
+                walk(value, inside)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, inside)
+
+    walk(ast, False)
+    events.sort(key=lambda event: event.name)
+    return events
+
+
+def collect_component_specs(chosen_node_id, ast, analysis, where):
+    """Events, telemetry channels and commands declared by one component.
+
+    All three reach Rust the same way as events do -- through the generated
+    Env -- because all three need the autocoded base: the time port and event
+    buffer for an event, the channel ID and time tag for telemetry, and the
+    command-response port for a command.
+    """
+    events, channels, commands = [], [], []
+    type_map = analysis["typeMap"]
+
+    def walk(node, inside):
+        if isinstance(node, dict):
+            if "DefComponent" in node:
+                data, this_id = unwrap(node["DefComponent"]["node"])
+                walk(data, this_id == chosen_node_id)
+                return
+            if inside and "SpecEvent" in node:
+                data, _ = unwrap(node["SpecEvent"]["node"])
+                severity = (
+                    next(iter(data["severity"]))
+                    if isinstance(data["severity"], dict)
+                    else data["severity"]
+                )
+                if severity not in SEVERITY_SUFFIX:
+                    raise GeneratorError(
+                        f"{where}.{data['name']}: unknown event severity {severity}"
+                    )
+                events.append(
+                    Event(
+                        data["name"],
+                        severity,
+                        spec_params(
+                            data["params"], type_map, f"{where}.{data['name']}"
+                        ),
+                    )
+                )
+                return
+            if inside and "SpecTlmChannel" in node:
+                data, _ = unwrap(node["SpecTlmChannel"]["node"])
+                _, type_id = unwrap(data["typeName"])
+                channels.append(
+                    Channel(
+                        data["name"],
+                        described_type(
+                            type_map,
+                            type_id,
+                            data["typeName"],
+                            f"{where}.{data['name']}",
+                        ),
+                    )
+                )
+                return
+            if inside and "SpecCommand" in node:
+                data, _ = unwrap(node["SpecCommand"]["node"])
+                kind = (
+                    next(iter(data["kind"]))
+                    if isinstance(data["kind"], dict)
+                    else data["kind"]
+                )
+                commands.append(
+                    Command(
+                        data["name"],
+                        kind,
+                        spec_params(
+                            data["params"], type_map, f"{where}.{data['name']}"
+                        ),
+                    )
+                )
+                return
+            for value in node.values():
+                walk(value, inside)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, inside)
+
+    walk(ast, False)
+    events.sort(key=lambda e: e.name)
+    channels.sort(key=lambda c: c.name)
+    commands.sort(key=lambda c: c.name)
+    return events, channels, commands
 
 
 def iter_port_definitions(ast):
@@ -895,59 +1080,237 @@ def component_ast_name(ast, node_id):
     return result[0] if result else None
 
 
-def port_params(definition, analysis, where):
-    """Describe a port's formal parameters, refusing shapes the glue cannot carry."""
-    if opt(definition.get("returnType")) is not None:
-        raise GeneratorError(
-            f"{where}: ports with return types are not generated yet "
-            "(the value must cross back over the FFI)"
-        )
-    type_map = analysis["typeMap"]
-    params = []
-    for entry in definition["params"]:
+def qualified_cpp(type_name_node):
+    """The C++ spelling of a `TypeNameQualIdent`, e.g. `ComCfg::Apid`."""
+    data, _ = unwrap(type_name_node)
+    ident = data.get("TypeNameQualIdent")
+    if ident is None:
+        return None
+    parts = []
+
+    def walk(node):
+        inner, _ = unwrap(node)
+        if isinstance(inner, str):
+            parts.append(inner)
+            return
+        if "Unqualified" in inner:
+            parts.append(inner["Unqualified"]["name"])
+            return
+        if "Qualified" in inner:
+            walk(inner["Qualified"]["qualifier"])
+            walk(inner["Qualified"]["name"])
+            return
+        raise GeneratorError(f"unsupported qualified identifier: {list(inner)}")
+
+    walk(ident["name"])
+    return "::".join(parts)
+
+
+def described_type(type_map, type_id, type_name_node, where):
+    """Resolve one parameter or return type into a descriptor the glue can carry.
+
+    Primitives and bools pass straight through. An FPP *enum* is carried as its
+    representation type: `fpp-to-cpp` emits enums as a class deriving
+    `Fw::Serializable`, so the object itself has a vtable and no stable ABI --
+    but its `.e` member is exactly the repr, and that is what crosses.
+    Structs, arrays and strings are still refused: they would need the whole
+    serialized form to cross, which is a different design.
+    """
+    # Checked before resolve_type: Fw.Buffer is an FPP *abstract* type, which
+    # the type resolver has no representation for.
+    cpp = qualified_cpp(type_name_node)
+    if cpp == "Fw::Buffer":
+        # Fw::Buffer derives Fw::Serializable, so the object has a vtable and
+        # no stable ABI -- but it is really (data, size, context), and those
+        # three cross fine as a repr(C) triple.
+        return ("buffer", None, None, cpp)
+    desc = resolve_type(type_map, type_id)
+    if desc[0] in ("prim", "bool"):
+        return desc
+    entry = type_map.get(str(type_id))
+    if isinstance(entry, dict) and "Enum" in entry:
+        repr_name = next(iter(entry["Enum"]["repType"]["kind"]))
+        repr_rust, size = PRIMITIVES[repr_name]
+        cpp = qualified_cpp(type_name_node)
+        if cpp is None:
+            raise GeneratorError(f"{where}: enum type has no qualified name")
+        return ("enum", repr_rust, size, cpp)
+    raise GeneratorError(
+        f"{where}: only primitive, bool and enum types are generated yet, "
+        f"got {desc[0]}"
+    )
+
+
+class Param:
+    """One formal parameter of a port or an event."""
+
+    def __init__(self, name, desc, by_ref):
+        self.name = name
+        self.desc = desc
+        # FPP `ref`: the C++ handler takes a non-const reference, so the value
+        # can come back changed. Crosses as a pointer.
+        self.by_ref = by_ref
+
+    def __iter__(self):
+        # Older call sites unpack these as (name, desc).
+        return iter((self.name, self.desc))
+
+
+def spec_params(params, type_map, where):
+    """Describe the formal parameters of a port or an event."""
+    out = []
+    for entry in params:
         data, _ = unwrap(entry[1])
         kind = (
             next(iter(data["kind"])) if isinstance(data["kind"], dict) else data["kind"]
         )
-        if kind != "Value":
-            raise GeneratorError(
-                f"{where}.{data['name']}: `ref` parameters are not generated yet"
-            )
+        if kind not in ("Value", "Ref"):
+            raise GeneratorError(f"{where}.{data['name']}: unsupported kind {kind}")
         _, type_id = unwrap(data["typeName"])
-        desc = resolve_type(type_map, type_id)
-        if desc[0] not in ("prim", "bool"):
-            raise GeneratorError(
-                f"{where}.{data['name']}: only primitive and bool parameters are "
-                f"generated yet, got {desc[0]}"
-            )
-        params.append((data["name"], desc))
-    return params
+        desc = described_type(
+            type_map, type_id, data["typeName"], f"{where}.{data['name']}"
+        )
+        out.append(Param(data["name"], desc, kind == "Ref"))
+    return out
+
+
+def port_signature(definition, analysis, where):
+    """A port's parameters and return type, refusing shapes the glue cannot carry."""
+    type_map = analysis["typeMap"]
+    ret = None
+    return_node = opt(definition.get("returnType"))
+    if return_node is not None:
+        _, ret_id = unwrap(return_node)
+        ret = described_type(type_map, ret_id, return_node, f"{where}: return type")
+        if ret[0] == "enum":
+            # A returned enum would have to be reconstructed as a C++ object on
+            # the way back, which is more than passing `.e` across.
+            raise GeneratorError(f"{where}: enum return types are not generated yet")
+    return spec_params(definition["params"], type_map, where), ret
+
+
+#: Rust primitive spelling -> the C spelling that crosses the boundary.
+C_PRIMITIVES = {
+    "u8": "uint8_t",
+    "u16": "uint16_t",
+    "u32": "uint32_t",
+    "u64": "uint64_t",
+    "i8": "int8_t",
+    "i16": "int16_t",
+    "i32": "int32_t",
+    "i64": "int64_t",
+    "f32": "float",
+    "f64": "double",
+}
 
 
 def c_type(desc):
-    """The C spelling of a parameter type."""
+    """The C spelling of a parameter type. Enums cross as their repr."""
     if desc[0] == "bool":
         return "bool"
-    return {
-        "u8": "uint8_t",
-        "u16": "uint16_t",
-        "u32": "uint32_t",
-        "u64": "uint64_t",
-        "i8": "int8_t",
-        "i16": "int16_t",
-        "i32": "int32_t",
-        "i64": "int64_t",
-        "f32": "float",
-        "f64": "double",
-    }[desc[1]]
+    if desc[0] == "buffer":
+        return "FprimeRsBuffer"
+    return C_PRIMITIVES[desc[1]]
+
+
+def c_param_decl(param):
+    """How a parameter appears in the C declaration and the shim's call."""
+    ty = c_type(param.desc)
+    return f"{ty}* {param.name}" if param.by_ref else f"{ty} {param.name}"
 
 
 def rust_param_type(desc):
-    return "bool" if desc[0] == "bool" else desc[1]
+    """The Rust spelling. An enum crosses as its representation type."""
+    if desc[0] == "bool":
+        return "bool"
+    if desc[0] == "buffer":
+        return "Buffer"
+    return desc[1]
+
+
+def rust_param_decl(param):
+    """How a parameter appears in a trait method signature."""
+    ty = rust_param_type(param.desc)
+    return f"{param.name}: &mut {ty}" if param.by_ref else f"{param.name}: {ty}"
+
+
+def rust_stub_decl(param):
+    """How a parameter appears on the `extern "C"` stub."""
+    ty = rust_param_type(param.desc)
+    return f"{param.name}: *mut {ty}" if param.by_ref else f"{param.name}: {ty}"
+
+
+def cpp_param_type(param):
+    """The C++ spelling in the autocoded handler's signature.
+
+    fpp-to-cpp passes user-defined types by reference -- `const T&` for a
+    value parameter, `T&` for a `ref` one -- so an enum or a buffer is
+    declared that way even where FPP calls it a value.
+    """
+    desc, name = param.desc, param.name
+    if desc[0] in ("enum", "buffer"):
+        qualifier = "" if param.by_ref else "const "
+        return f"{qualifier}{desc[3]}& {name}"
+    if param.by_ref:
+        return f"{c_type(desc)}& {name}"
+    return f"{c_type(desc)} {name}"
+
+
+def cpp_prologue(param):
+    """Statements the shim runs before the call, to marshal a parameter in."""
+    desc, name = param.desc, param.name
+    if desc[0] == "buffer":
+        return [
+            f"    FprimeRsBuffer rs_{name} = {{{name}.getData(), {name}.getSize(), "
+            f"{name}.getContext()}};"
+        ]
+    if param.by_ref and desc[0] == "enum":
+        # The enum object cannot cross; its value can.
+        return [
+            f"    {c_type(desc)} rs_{name} = static_cast<{c_type(desc)}>({name}.e);"
+        ]
+    return []
+
+
+def cpp_argument(param):
+    """How the shim hands a parameter across the boundary."""
+    desc, name = param.desc, param.name
+    if desc[0] == "buffer":
+        return f"&rs_{name}"
+    if desc[0] == "enum":
+        if param.by_ref:
+            return f"&rs_{name}"
+        # `.e` is the underlying value; the object itself has a vtable.
+        return f"static_cast<{c_type(desc)}>({name}.e)"
+    return f"&{name}" if param.by_ref else name
+
+
+def cpp_epilogue(param):
+    """Statements the shim runs after the call, to marshal a parameter back."""
+    desc, name = param.desc, param.name
+    if desc[0] == "buffer" and param.by_ref:
+        # Only size and context are written back. `setData` and `setSize` are
+        # bounds-checked against the original allocation in C++, and letting
+        # Rust move the data pointer would be a different contract than the
+        # one Fw::Buffer documents.
+        return [
+            f"    {name}.setSize(rs_{name}.size);",
+            f"    {name}.setContext(rs_{name}.context);",
+        ]
+    if param.by_ref and desc[0] == "enum":
+        return [f"    {name} = static_cast<{desc[3]}::T>(rs_{name});"]
+    return []
 
 
 def snake(name):
-    """FPP port names are camelCase; trait methods read better in snake_case."""
+    """FPP port names are camelCase; trait methods read better in snake_case.
+
+    Command names are conventionally SCREAMING_SNAKE_CASE already, and running
+    the camelCase rule over those produces `s_e_t__t_o_t_a_l`, so they are
+    simply lowercased.
+    """
+    if name.upper() == name:
+        return name.lower()
     out = []
     for index, char in enumerate(name):
         if char.isupper() and index > 0:
@@ -956,7 +1319,9 @@ def snake(name):
     return "".join(out)
 
 
-def generate_component_rust(module_path, component, ports, model_label):
+def generate_component_rust(
+    module_path, component, ports, events, channels, commands, model_label
+):
     """The Rust side: a handler trait plus the extern "C" dispatch stubs.
 
     The dispatch carries the component INSTANCE, not a global: F Prime
@@ -972,6 +1337,9 @@ def generate_component_rust(module_path, component, ports, model_label):
     """
     prefix = f"fprime_rs_{component.lower()}"
     trait = f"{component}Handlers"
+    # The Env exists if the component can call anything back: emit an event,
+    # write telemetry, or answer a command.
+    has_env = bool(events or channels or commands)
     out = [
         f"//! Rust glue for the FPP component `{'.'.join(list(module_path) + [component])}`.",
         "//!",
@@ -986,6 +1354,44 @@ def generate_component_rust(module_path, component, ports, model_label):
         "",
         "use core::ffi::c_void;",
         "",
+    ]
+    if any(p.desc[0] == "buffer" for port in ports for p in port.params):
+        out += [
+            "use fprime_config::FwSizeType;",
+            "",
+            "/// An `Fw::Buffer` as it crosses the boundary: the triple the C++",
+            "/// object really is. A `ref` parameter's `size` and `context` are",
+            "/// written back to the C++ object after the call; `data` is not,",
+            "/// because `Fw::Buffer::setData` is bounds-checked against the",
+            "/// original allocation and moving it is a different contract.",
+            "#[repr(C)]",
+            "pub struct Buffer {",
+            "    /// Start of the payload",
+            "    pub data: *mut u8,",
+            "    /// Bytes available at `data`",
+            "    pub size: FwSizeType,",
+            "    /// Caller-defined tag carried with the buffer",
+            "    pub context: u32,",
+            "}",
+            "",
+            "impl Buffer {",
+            "    /// The payload as a slice.",
+            "    ///",
+            "    /// # Safety",
+            "    /// Valid only while the C++ `Fw::Buffer` this came from is alive",
+            "    /// and its allocation is unchanged -- i.e. during the port call.",
+            "    pub unsafe fn as_slice(&self) -> &[u8] {",
+            "        if self.size == 0 || self.data.is_null() {",
+            "            &[]",
+            "        } else {",
+            "            // SAFETY: the caller guarantees the buffer outlives this.",
+            "            unsafe { core::slice::from_raw_parts(self.data, self.size as usize) }",
+            "        }",
+            "    }",
+            "}",
+            "",
+        ]
+    out += [
         "/// Handlers for each input port of the component.",
         "///",
         "/// Methods take `&self`: sync input ports run on the caller's thread, so",
@@ -994,12 +1400,25 @@ def generate_component_rust(module_path, component, ports, model_label):
         f"pub trait {trait}: Sync {{",
     ]
     for port in ports:
-        args = "".join(
-            f", {name}: {rust_param_type(desc)}" for name, desc in port.params
-        )
+        args = "".join(f", {rust_param_decl(p)}" for p in port.params)
+        ret = f" -> {rust_param_type(port.ret)}" if port.ret else ""
+        env = ", env: &Env" if has_env else ""
         out.append(f"    /// `{port.name}` ({port.kind})")
-        out.append(f"    fn {snake(port.name)}(&self, port_num: i32{args});")
+        out.append(f"    fn {snake(port.name)}(&self, port_num: i32{env}{args}){ret};")
+    for command in commands:
+        args = "".join(f", {rust_param_decl(p)}" for p in command.params)
+        out.append(f"    /// `{command.name}` command ({command.kind})")
+        out.append("    ///")
+        out.append("    /// Must answer exactly once with `env.respond(...)`:")
+        out.append("    /// the dispatcher is waiting on it.")
+        out.append(
+            f"    fn cmd_{snake(command.name)}"
+            f"(&self, env: &Env, opcode: u32, cmd_seq: u32{args});"
+        )
     out.append("}")
+    if has_env:
+        out.append("")
+        out += generate_env_rust(events, channels, commands)
     out.append("")
     out.append("/// The opaque instance pointer to hand to `setRustHandlers`.")
     out.append("///")
@@ -1030,10 +1449,27 @@ def generate_component_rust(module_path, component, ports, model_label):
     out.append("}")
     out.append("")
     for port in ports:
-        c_args = "".join(
-            f", {name}: {rust_param_type(desc)}" for name, desc in port.params
+        c_args = "".join(f", {rust_stub_decl(p)}" for p in port.params)
+        call_args = "".join(f", {p.name}" for p in port.params)
+        # `ref` parameters are bound before the call so the unsafe block can
+        # carry its own SAFETY comment, which the workspace lints require.
+        ref_binds = (
+            [
+                "        // SAFETY: a `ref` parameter arrives as a pointer the",
+                "        // C++ side owns for the duration of this call.",
+            ]
+            if any(p.by_ref for p in port.params)
+            else []
         )
-        call_args = "".join(f", {name}" for name, _ in port.params)
+        ref_binds += [
+            f"        let {p.name} = unsafe {{ &mut *{p.name} }};"
+            for p in port.params
+            if p.by_ref
+        ]
+        env_param = ", env: *const Env" if has_env else ""
+        env_arg = ", env" if has_env else ""
+        ret_ty = rust_param_type(port.ret) if port.ret else None
+        ret = f" -> {ret_ty}" if ret_ty else ""
         out.append(
             f"/// Dispatch stub for `{port.name}`, called by the generated C++ shim."
         )
@@ -1042,27 +1478,193 @@ def generate_component_rust(module_path, component, ports, model_label):
         out.append(
             "/// `handlers` must be a pointer produced by [`handler_ptr`], or null."
         )
+        if has_env:
+            out.append("/// `env` must point to a live Env for the calling instance.")
+        if ret_ty:
+            out.append("///")
+            out.append(
+                f"/// A null `handlers` yields `{ret_ty}::default()`: a component "
+                "whose"
+            )
+            out.append(
+                "/// handlers were never installed answers with a zero rather than"
+            )
+            out.append("/// dereferencing.")
         out.append("#[no_mangle]")
         out.append(
             f'pub unsafe extern "C" fn {prefix}_{port.name}('
-            f"handlers: *const c_void, port_num: i32{c_args}) {{"
+            f"handlers: *const c_void, port_num: i32{env_param}{c_args}){ret} {{"
         )
         out.append(
             "    // SAFETY: forwarded unchanged from the shim, which stores only"
         )
         out.append("    // pointers produced by `handler_ptr`.")
         out.append("    if let Some(handlers) = unsafe { handlers_from(handlers) } {")
-        out.append(f"        handlers.{snake(port.name)}(port_num{call_args});")
-        out.append("    }")
+        if has_env:
+            out.append("        // SAFETY: the shim builds the Env on its own stack")
+            out.append("        // and it outlives this call.")
+            out.append("        let env = unsafe { &*env };")
+        out += ref_binds
+        body = f"handlers.{snake(port.name)}(port_num{env_arg}{call_args})"
+        if ret_ty:
+            out.append(f"        return {body};")
+            out.append("    }")
+            out.append(f"    {ret_ty}::default()")
+        else:
+            out.append(f"        {body};")
+            out.append("    }")
         out.append("}")
         out.append("")
+    for command in commands:
+        c_args = "".join(f", {rust_stub_decl(p)}" for p in command.params)
+        call_args = "".join(f", {p.name}" for p in command.params)
+        cmd_binds = (
+            [
+                "        // SAFETY: a `ref` parameter arrives as a pointer the",
+                "        // C++ side owns for the duration of this call.",
+            ]
+            if any(p.by_ref for p in command.params)
+            else []
+        )
+        cmd_binds += [
+            f"        let {p.name} = unsafe {{ &mut *{p.name} }};"
+            for p in command.params
+            if p.by_ref
+        ]
+        out += [
+            f"/// Dispatch stub for the `{command.name}` command.",
+            "///",
+            "/// # Safety",
+            "/// `handlers` must come from [`handler_ptr`], or be null; `env`",
+            "/// must point to a live Env for the calling instance.",
+            "#[no_mangle]",
+            f'pub unsafe extern "C" fn {prefix}_cmd_{command.name}('
+            "handlers: *const c_void, env: *const Env, opcode: u32, "
+            f"cmd_seq: u32{c_args}) {{",
+            "    // SAFETY: forwarded unchanged from the shim.",
+            "    if let Some(handlers) = unsafe { handlers_from(handlers) } {",
+            "        // SAFETY: the shim builds the Env on its own stack and it",
+            "        // outlives this call.",
+            "        let env = unsafe { &*env };",
+            *cmd_binds,
+            f"        handlers.cmd_{snake(command.name)}"
+            f"(env, opcode, cmd_seq{call_args});",
+            "    }",
+            "}",
+            "",
+        ]
     return "\n".join(out)
 
 
-def generate_component_header(module_path, component, ports, model_label):
+def generate_env_rust(events, channels=(), commands=()):
+    """The Env: what a Rust handler can call back into the component to do.
+
+    Only events today. Each entry is a C function pointer the generated C++
+    shim fills with a captureless lambda over the autocoded base's emitter, so
+    the base keeps ownership of the time port and the event buffer.
+    """
+    out = [
+        "/// Callbacks into the component instance, for what Rust cannot own.",
+        "///",
+        "/// Built by the generated shim on its own stack for the duration of one",
+        "/// port call. Do not store it.",
+        "#[repr(C)]",
+        "pub struct Env {",
+        "    /// The C++ component instance the callbacks act on",
+        "    pub component: *mut c_void,",
+    ]
+    for event in events:
+        args = "".join(f", {rust_param_type(p.desc)}" for p in event.params)
+        out.append(f"    /// Emit the `{event.name}` event ({event.severity})")
+        out.append(
+            f"    pub {snake(event.name)}: "
+            f'Option<unsafe extern "C" fn(*mut c_void{args})>,'
+        )
+    for channel in channels:
+        out.append(f"    /// Write the `{channel.name}` telemetry channel")
+        out.append(
+            f"    pub tlm_{snake(channel.name)}: "
+            f'Option<unsafe extern "C" fn(*mut c_void, '
+            f"{rust_param_type(channel.desc)})>,"
+        )
+    if commands:
+        out += [
+            "    /// Answer a command. Every command handler must call this",
+            "    /// exactly once: the dispatcher is waiting on it.",
+            "    pub cmd_response: ",
+            '        Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32)>,',
+        ]
+    out += (
+        [
+            "}",
+            "",
+            "/// The command responses the dispatcher understands.",
+            "pub mod cmd_response {",
+            "    /// `Fw::CmdResponse::OK`",
+            "    pub const OK: u32 = 0;",
+            "    /// `Fw::CmdResponse::INVALID_OPCODE`",
+            "    pub const INVALID_OPCODE: u32 = 1;",
+            "    /// `Fw::CmdResponse::VALIDATION_ERROR`",
+            "    pub const VALIDATION_ERROR: u32 = 2;",
+            "    /// `Fw::CmdResponse::FORMAT_ERROR`",
+            "    pub const FORMAT_ERROR: u32 = 3;",
+            "    /// `Fw::CmdResponse::EXECUTION_ERROR`",
+            "    pub const EXECUTION_ERROR: u32 = 4;",
+            "    /// `Fw::CmdResponse::BUSY`",
+            "    pub const BUSY: u32 = 5;",
+            "}",
+            "",
+            "impl Env {",
+        ]
+        if commands
+        else ["}", "", "impl Env {"]
+    )
+    for event in events:
+        args = "".join(f", {p.name}: {rust_param_type(p.desc)}" for p in event.params)
+        call = "".join(f", {p.name}" for p in event.params)
+        out += [
+            f"    /// Emit `{event.name}`; a no-op if the shim left it unset.",
+            f"    pub fn {snake(event.name)}(&self{args}) {{",
+            f"        if let Some(emit) = self.{snake(event.name)} {{",
+            "            // SAFETY: the shim installs a function valid for the",
+            "            // component pointer it paired with it.",
+            f"            unsafe {{ emit(self.component{call}) }};",
+            "        }",
+            "    }",
+        ]
+    for channel in channels:
+        out += [
+            f"    /// Write `{channel.name}`; a no-op if the shim left it unset.",
+            f"    pub fn tlm_{snake(channel.name)}(&self, value: "
+            f"{rust_param_type(channel.desc)}) {{",
+            f"        if let Some(write) = self.tlm_{snake(channel.name)} {{",
+            "            // SAFETY: the shim installs a function valid for the",
+            "            // component pointer it paired with it.",
+            "            unsafe { write(self.component, value) };",
+            "        }",
+            "    }",
+        ]
+    if commands:
+        out += [
+            "    /// Answer a command, with one of the `cmd_response` constants.",
+            "    pub fn respond(&self, opcode: u32, cmd_seq: u32, response: u32) {",
+            "        if let Some(respond) = self.cmd_response {",
+            "            // SAFETY: as above.",
+            "            unsafe { respond(self.component, opcode, cmd_seq, response) };",
+            "        }",
+            "    }",
+        ]
+    out.append("}")
+    return out
+
+
+def generate_component_header(
+    module_path, component, ports, events, channels, commands, model_label
+):
     """The C declarations the shim calls."""
     guard = f"FPRIME_RS_{component.upper()}_GLUE_H"
     prefix = f"fprime_rs_{component.lower()}"
+    has_env = bool(events or channels or commands)
     out = [
         f"// GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
         f"// Model: {model_label}",
@@ -1072,6 +1674,8 @@ def generate_component_header(module_path, component, ports, model_label):
         "",
         "#include <stdbool.h>",
         "#include <stdint.h>",
+        "",
+        "#include <Fw/FPrimeBasicTypes.h>",
         "",
         "// Each stub carries the component INSTANCE as an opaque pointer, obtained",
         "// from the Rust side's handler_ptr() and installed with the component's",
@@ -1083,63 +1687,197 @@ def generate_component_header(module_path, component, ports, model_label):
         "#endif",
         "",
     ]
+    uses_buffer = any(p.desc[0] == "buffer" for port in ports for p in port.params)
+    if uses_buffer:
+        out += [
+            "//! An Fw::Buffer as it crosses the boundary.",
+            "//!",
+            "//! Fw::Buffer derives Fw::Serializable, so the object has a vtable",
+            '//! and cannot cross extern "C" -- but it is really this triple, and',
+            "//! the shim marshals it in and (for a `ref` parameter) back out.",
+            "typedef struct {",
+            "    uint8_t* data;",
+            "    FwSizeType size;",
+            "    uint32_t context;",
+            "} FprimeRsBuffer;",
+            "",
+        ]
+    if has_env:
+        out.append("//! Callbacks into the component, for what Rust cannot own.")
+        out.append("//! The shim fills these in for the duration of one port call.")
+        out.append(f"typedef struct {prefix}_Env {{")
+        out.append("    void* component;")
+        for event in events:
+            args = "".join(f", {c_type(p.desc)} {p.name}" for p in event.params)
+            out.append(f"    void (*{snake(event.name)})(void* component{args});")
+        for channel in channels:
+            out.append(
+                f"    void (*tlm_{snake(channel.name)})"
+                f"(void* component, {c_type(channel.desc)} value);"
+            )
+        if commands:
+            out.append(
+                "    void (*cmd_response)(void* component, uint32_t opcode, "
+                "uint32_t cmdSeq, uint32_t response);"
+            )
+        out.append(f"}} {prefix}_Env;")
+        out.append("")
     for port in ports:
-        args = "".join(f", {c_type(desc)} {name}" for name, desc in port.params)
+        args = "".join(f", {c_param_decl(p)}" for p in port.params)
+        env = f", const {prefix}_Env* env" if has_env else ""
+        ret = c_type(port.ret) if port.ret else "void"
         out.append(f"//! Dispatch `{port.name}` ({port.kind}) into the Rust handler")
         out.append(
-            f"void {prefix}_{port.name}(const void* handlers, int32_t portNum{args});"
+            f"{ret} {prefix}_{port.name}(const void* handlers, int32_t portNum{env}{args});"
+        )
+        out.append("")
+    for command in commands:
+        args = "".join(f", {c_param_decl(p)}" for p in command.params)
+        out.append(f"//! Dispatch the `{command.name}` command into Rust")
+        out.append(
+            f"void {prefix}_cmd_{command.name}(const void* handlers, "
+            f"const {prefix}_Env* env, uint32_t opcode, uint32_t cmdSeq{args});"
         )
         out.append("")
     out += ["#ifdef __cplusplus", "}", "#endif", "", f"#endif  // {guard}", ""]
     return "\n".join(out)
 
 
+def env_construction(component, events, channels, commands, prefix):
+    """The Env the shim hands to Rust for one port call.
+
+    Each entry is a *captureless* lambda, so it converts to a plain function
+    pointer. Written inside a member function, the lambda's body sits in the
+    class's scope, which is what lets it reach the autocoded base's protected
+    emitter through the instance it is handed.
+    """
+    out = [
+        f"    {prefix}_Env env = {{}};",
+        "    env.component = this;",
+    ]
+    for event in events:
+        params = "".join(f", {c_type(p.desc)} {p.name}" for p in event.params)
+        call = "".join(f", {p.name}" for p in event.params)
+        out += [
+            f"    env.{snake(event.name)} = [](void* component{params}) {{",
+            f"        static_cast<{component}*>(component)->{event.cpp_method}({call.lstrip(', ')});",
+            "    };",
+        ]
+    for channel in channels:
+        out += [
+            f"    env.tlm_{snake(channel.name)} = "
+            f"[](void* component, {c_type(channel.desc)} value) {{",
+            f"        static_cast<{component}*>(component)->tlmWrite_{channel.name}(value);",
+            "    };",
+        ]
+    if commands:
+        out += [
+            "    env.cmd_response = [](void* component, uint32_t opcode,",
+            "                          uint32_t cmdSeq, uint32_t response) {",
+            f"        static_cast<{component}*>(component)->cmdResponse_out(",
+            "            static_cast<FwOpcodeType>(opcode), cmdSeq,",
+            "            Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));",
+            "    };",
+        ]
+    return out
+
+
 def generate_component_shim(
-    module_path, component, ports, model_label, include_path, glue_include
+    module_path,
+    component,
+    ports,
+    events,
+    channels,
+    commands,
+    model_label,
+    include_path,
+    glue_include,
 ):
     """The C++ shim: the component class, forwarding each handler into Rust."""
-    namespace = module_path[0] if module_path else "Components"
-    out = [
-        "// ======================================================================",
-        f"// GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
-        f"// Model: {model_label}",
-        "//",
-        f"// Shim for {'.'.join(list(module_path) + [component])}: the autocoded base",
-        "// keeps ownership of ports, threading and the framework plumbing; each",
-        "// input port handler forwards into the Rust implementation.",
-        "// ======================================================================",
-        "",
-        f'#include "{include_path}"',
-        f'#include "{glue_include}"',
-        "",
-        f"namespace {namespace} {{",
-        "",
-        f"{component} ::{component}(const char* const compName)",
-        f"    : {component}ComponentBase(compName), m_rustHandlers(nullptr) {{}}",
-        "",
-        f"{component} ::~{component}() {{}}",
-        "",
-        "//! Install the Rust instance that answers this component's ports. Call",
-        "//! once during initialization, before the topology connects ports: the",
-        "//! pointer is read by every handler and is not synchronized.",
-        f"void {component} ::setRustHandlers(const void* handlers) {{",
-        "    this->m_rustHandlers = handlers;",
-        "}",
-        "",
-    ]
+    # Every segment of the module path, not just the first: components in
+    # nested modules (Svc.Ccsds.ApidManager) are the common case in-tree, and
+    # emitting only the outer one puts the definitions in the wrong scope.
+    namespaces = list(module_path) if module_path else ["Components"]
+    out = (
+        [
+            "// ======================================================================",
+            f"// GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
+            f"// Model: {model_label}",
+            "//",
+            f"// Shim for {'.'.join(list(module_path) + [component])}: the autocoded base",
+            "// keeps ownership of ports, threading and the framework plumbing; each",
+            "// input port handler forwards into the Rust implementation.",
+            "// ======================================================================",
+            "",
+            f'#include "{include_path}"',
+            f'#include "{glue_include}"',
+            "",
+        ]
+        + [f"namespace {name} {{" for name in namespaces]
+        + [
+            "",
+            f"{component} ::{component}(const char* const compName)",
+            f"    : {component}ComponentBase(compName), m_rustHandlers(nullptr) {{}}",
+            "",
+            f"{component} ::~{component}() {{}}",
+            "",
+            "//! Install the Rust instance that answers this component's ports. Call",
+            "//! once during initialization, before the topology connects ports: the",
+            "//! pointer is read by every handler and is not synchronized.",
+            f"void {component} ::setRustHandlers(const void* handlers) {{",
+            "    this->m_rustHandlers = handlers;",
+            "}",
+            "",
+        ]
+    )
+    prefix = f"fprime_rs_{component.lower()}"
+    has_env = bool(events or channels or commands)
     for port in ports:
-        args = "".join(f", {c_type(desc)} {name}" for name, desc in port.params)
-        call = "".join(f", {name}" for name, _ in port.params)
+        args = "".join(f", {cpp_param_type(p)}" for p in port.params)
+        call = "".join(f", {cpp_argument(p)}" for p in port.params)
+        ret = c_type(port.ret) if port.ret else "void"
         out.append(
-            f"void {component} ::{port.name}_handler(FwIndexType portNum{args}) {{"
+            f"{ret} {component} ::{port.name}_handler(FwIndexType portNum{args}) {{"
         )
-        out.append(
-            f"    {'fprime_rs_' + component.lower()}_{port.name}("
-            f"this->m_rustHandlers, static_cast<int32_t>(portNum){call});"
+        for p in port.params:
+            out += cpp_prologue(p)
+        if has_env:
+            out += env_construction(component, events, channels, commands, prefix)
+        env_arg = ", &env" if has_env else ""
+        invoke = (
+            f"{prefix}_{port.name}(this->m_rustHandlers, "
+            f"static_cast<int32_t>(portNum){env_arg}{call})"
         )
+        epilogue = [line for p in port.params for line in cpp_epilogue(p)]
+        if epilogue and port.ret:
+            out.append(f"    const {ret} rs_result = {invoke};")
+            out += epilogue
+            out.append("    return rs_result;")
+        else:
+            out.append(f"    {'return ' if port.ret else ''}{invoke};")
+            out += epilogue
         out.append("}")
         out.append("")
-    out.append(f"}}  // namespace {namespace}")
+    for command in commands:
+        args = "".join(f", {cpp_param_type(p)}" for p in command.params)
+        call = "".join(f", {cpp_argument(p)}" for p in command.params)
+        out.append(
+            f"void {component} ::{command.name}_cmdHandler("
+            f"FwOpcodeType opCode, U32 cmdSeq{args}) {{"
+        )
+        for p in command.params:
+            out += cpp_prologue(p)
+        out += env_construction(component, events, channels, commands, prefix)
+        out.append(
+            f"    {prefix}_cmd_{command.name}(this->m_rustHandlers, &env, "
+            f"static_cast<uint32_t>(opCode), cmdSeq{call});"
+        )
+        for p in command.params:
+            out += cpp_epilogue(p)
+        out.append("}")
+        out.append("")
+    for name in reversed(namespaces):
+        out.append(f"}}  // namespace {name}")
     out.append("")
     return "\n".join(out)
 
@@ -1157,6 +1895,14 @@ def emit_component(ast, analysis, args):
             break
 
     ports = collect_ports(ast, analysis, args.component, args.component)
+    events, channels, commands = [], [], []
+    for entry in analysis.get("componentMap", {}).values():
+        node_id = entry["aNode"]["astNodeId"]
+        if component_ast_name(ast, node_id) == args.component:
+            events, channels, commands = collect_component_specs(
+                node_id, ast, analysis, args.component
+            )
+            break
     if not ports:
         raise GeneratorError(
             f"{args.component}: no input ports the generator can carry "
@@ -1167,13 +1913,25 @@ def emit_component(ast, analysis, args):
         (
             args.out,
             generate_component_rust(
-                module_path, args.component, ports, args.module_name
+                module_path,
+                args.component,
+                ports,
+                events,
+                channels,
+                commands,
+                args.module_name,
             ),
         ),
         (
             args.out_header,
             generate_component_header(
-                module_path, args.component, ports, args.module_name
+                module_path,
+                args.component,
+                ports,
+                events,
+                channels,
+                commands,
+                args.module_name,
             ),
         ),
         (
@@ -1182,6 +1940,9 @@ def emit_component(ast, analysis, args):
                 module_path,
                 args.component,
                 ports,
+                events,
+                channels,
+                commands,
                 args.module_name,
                 args.shim_include,
                 args.glue_include,
@@ -1221,6 +1982,473 @@ def component_module_path(ast, component_name):
     for unit in ast:
         walk(unit["members"], [])
     return found[0] if found else ()
+
+
+# ---------------------------------------------------------------------------
+# Topology generation (Phase 11)
+# ---------------------------------------------------------------------------
+#
+# Verification-only, deliberately. `fpp-to-cpp` turns a 582-line topology model
+# into 15,530 lines of C++; before anyone writes a Rust runtime to replace
+# that, the cheap question to settle is whether the topology is *mechanical* --
+# whether everything the generated C++ knows is already derivable from the
+# model. `fpp-to-json` exposes the resolved topology, so this emits it as Rust
+# data and then checks those facts against the C++ that already exists in the
+# build tree. Nothing links and nothing runs; what it produces is an answer.
+
+
+def qualified(name):
+    """`{"qualifier": ["CdhCore"], "base": "cmdDisp"}` -> `CdhCore.cmdDisp`."""
+    return ".".join(list(name.get("qualifier", [])) + [name["base"]])
+
+
+class Instance:
+    """One component instance, as the topology resolved it."""
+
+    def __init__(
+        self, name, component, base_id, active, priority, stack, queue, cpu, phases
+    ):
+        self.name = name  # dotted, e.g. CdhCore.cmdDisp
+        self.component = component
+        self.base_id = base_id
+        self.active = active
+        self.priority = priority
+        self.stack = stack
+        self.queue = queue
+        self.cpu = cpu
+        # [(phase name, literal C++)] -- the model's escape hatch, see below
+        self.phases = phases
+
+    @property
+    def cpp(self):
+        """The C++ spelling the generated topology uses."""
+        return self.name.replace(".", "::")
+
+
+class Connection:
+    """One resolved connection: an output port to an input port."""
+
+    def __init__(self, graph, from_inst, from_port, from_num, to_inst, to_port, to_num):
+        self.graph = graph
+        self.from_inst = from_inst
+        self.from_port = from_port
+        self.from_num = from_num
+        self.to_inst = to_inst
+        self.to_port = to_port
+        self.to_num = to_num
+
+
+def component_ast_kind(ast, node_id):
+    """`Active`, `Queued` or `Passive` for a component's AST node.
+
+    Only active components get a thread, and so a `start()` call in the
+    generated topology -- which is not the same as "has a priority": one of
+    Ref's active components leaves its priority to the default.
+    """
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "DefComponent" in node:
+                data, this_id = unwrap(node["DefComponent"]["node"])
+                if this_id == node_id:
+                    kind = data.get("kind")
+                    found.append(next(iter(kind)) if isinstance(kind, dict) else kind)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(ast)
+    return found[0] if found else None
+
+
+def collect_phase_blocks(ast, instance_entry):
+    """The `phase Fpp.ToCpp.Phases.X """ + '"""..."""' + """` blocks on one instance.
+
+    These are literal C++ pasted into the generated topology, and they are the
+    one part of a topology that is *not* mechanical: nothing derives them, and
+    a Rust-native topology cannot translate them -- it can only require them
+    to be rewritten. Ref uses them to start a passive component
+    (`CdhCore::version.start()`), which is why a naive "active components ==
+    start() calls" check does not hold.
+    """
+    specs = instance_entry.get("initSpecifierMap") or {}
+    wanted = {entry["aNode"]["astNodeId"] for entry in specs.values()}
+    if not wanted:
+        return []
+
+    found = []
+
+    def phase_name(node):
+        data, _ = unwrap(node)
+        if "ExprDot" in data:
+            return unwrap(data["ExprDot"]["id"])[0]
+        return None
+
+    def walk(node):
+        if isinstance(node, dict):
+            inner = node.get("AstNode")
+            if isinstance(inner, dict) and inner.get("id") in wanted:
+                data = inner["data"]
+                if "code" in data and "phase" in data:
+                    found.append((phase_name(data["phase"]), data["code"]))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(ast)
+    found.sort(key=lambda entry: entry[0] or "")
+    return found
+
+
+def _port_endpoint(end, number):
+    """(instance ast id, port name, port number) for one end of a connection."""
+    port = end["port"]
+    instance = port["interfaceInstance"]
+    if "InterfaceComponentInstance" not in instance:
+        return None
+    instance_id = instance["InterfaceComponentInstance"]["astNodeId"]
+    holder = port["portInstance"]
+    kind = next(iter(holder))
+    name = holder[kind]["specifier"]["name"]
+    return instance_id, name, number
+
+
+def collect_topology(ast, analysis, topology_name):
+    """Resolve a topology into its instance and connection tables."""
+    topologies = analysis.get("topologyMap", {})
+    chosen = None
+    for entry in topologies.values():
+        if qualified(entry["qualifiedName"]) == topology_name:
+            chosen = entry
+            break
+    if chosen is None:
+        available = sorted(qualified(e["qualifiedName"]) for e in topologies.values())
+        raise GeneratorError(
+            f"no topology named '{topology_name}'; found: {', '.join(available)}"
+        )
+
+    by_node = {
+        entry["aNode"]["astNodeId"]: entry
+        for entry in analysis.get("componentInstanceMap", {}).values()
+    }
+
+    # `instanceMap` also carries the imported subtopologies; only the
+    # component instances become objects in the generated C++.
+    instances = []
+    for key, _loc in chosen["instanceMap"]:
+        if "InterfaceComponentInstance" not in key:
+            continue
+        entry = by_node[key["InterfaceComponentInstance"]["astNodeId"]]
+        kind = component_ast_kind(ast, entry["component"]["astNodeId"])
+        instances.append(
+            Instance(
+                qualified(entry["qualifiedName"]),
+                component_ast_name(ast, entry["component"]["astNodeId"]),
+                entry["baseId"],
+                kind == "Active",
+                opt(entry.get("priority")),
+                opt(entry.get("stackSize")),
+                opt(entry.get("queueSize")),
+                opt(entry.get("cpu")),
+                collect_phase_blocks(ast, entry),
+            )
+        )
+    instances.sort(key=lambda i: i.name)
+
+    # Port numbers are resolved per connection, in a parallel list.
+    def number_map(entries):
+        out = {}
+        for connection, number in entries:
+            # The port number is a bare integer here, not an Option, unlike
+            # the resource fields on an instance.
+            out[json.dumps(connection, sort_keys=True)] = (
+                number if isinstance(number, int) else opt(number)
+            )
+        return out
+
+    from_numbers = number_map(chosen["fromPortNumberMap"])
+    to_numbers = number_map(chosen["toPortNumberMap"])
+    names = {node: qualified(entry["qualifiedName"]) for node, entry in by_node.items()}
+
+    connections = []
+    for graph, entries in sorted(chosen["connectionMap"].items()):
+        for connection in entries:
+            key = json.dumps(connection, sort_keys=True)
+            source = _port_endpoint(connection["from"], from_numbers.get(key))
+            target = _port_endpoint(connection["to"], to_numbers.get(key))
+            if source is None or target is None:
+                raise GeneratorError(
+                    f"{graph}: connection endpoint is not a component instance"
+                )
+            connections.append(
+                Connection(
+                    graph,
+                    names[source[0]],
+                    source[1],
+                    source[2],
+                    names[target[0]],
+                    target[1],
+                    target[2],
+                )
+            )
+    connections.sort(key=lambda c: (c.graph, c.from_inst, c.from_port, c.from_num or 0))
+    return instances, connections
+
+
+def generate_topology_rust(topology_name, instances, connections, model_label):
+    """The topology as Rust data: the instance table and the connection table."""
+    active = sum(1 for i in instances if i.active)
+    out = [
+        f"//! The resolved FPP topology `{topology_name}`, as data.",
+        "//!",
+        "//! GENERATED by tools/fprime-rs/fpp_to_rust.py --topology -- do not edit.",
+        f"//! Model: `{model_label}`",
+        "//!",
+        "//! This is **verification-only** (fprime-rs Phase 11). Nothing here is",
+        "//! wired to anything: it exists to show that everything the autocoded",
+        "//! C++ topology knows is already derivable from the model, which is the",
+        "//! question that decides whether a Rust-native topology is mechanical.",
+        "//! `--verify-cpp` checks these facts against the generated C++.",
+        "//!",
+        f"//! {len(instances)} instances ({active} active), {len(connections)} connections.",
+        "#![allow(dead_code)]",
+        "",
+        "/// One component instance, with the resources the topology assigned it.",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+        "pub struct Instance {",
+        "    /// Dotted instance name, e.g. `CdhCore.cmdDisp`",
+        "    pub name: &'static str,",
+        "    /// The component type it instantiates",
+        "    pub component: &'static str,",
+        "    /// First ID of the block reserved for its commands/events/channels",
+        "    pub base_id: u32,",
+        "    /// Active components get a thread; queued and passive ones do not",
+        "    pub active: bool,",
+        "    /// Thread priority, where the model set one",
+        "    pub priority: Option<u32>,",
+        "    /// Thread stack size in bytes, where the model set one",
+        "    pub stack_size: Option<u32>,",
+        "    /// Message queue depth, for active and queued components",
+        "    pub queue_size: Option<u32>,",
+        "    /// CPU affinity, where the model set one (-1 means unset)",
+        "    pub cpu: Option<i32>,",
+        "}",
+        "",
+        "/// One resolved connection, output port to input port.",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+        "pub struct Connection {",
+        "    /// The connection graph it belongs to, e.g. `Time` or `RateGroups`",
+        "    pub graph: &'static str,",
+        "    /// Source instance and its output port",
+        "    pub from: Endpoint,",
+        "    /// Target instance and its input port",
+        "    pub to: Endpoint,",
+        "}",
+        "",
+        "/// One end of a connection.",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+        "pub struct Endpoint {",
+        "    /// Dotted instance name",
+        "    pub instance: &'static str,",
+        "    /// Port name as the component declares it",
+        "    pub port: &'static str,",
+        "    /// Index into that port's array, where the topology resolved one",
+        "    pub number: Option<u32>,",
+        "}",
+        "",
+        f"/// Every component instance in `{topology_name}`.",
+        f"pub const INSTANCES: [Instance; {len(instances)}] = [",
+    ]
+    for i in instances:
+        out.append(
+            "    Instance { "
+            f'name: "{i.name}", component: "{i.component}", base_id: {i.base_id}, '
+            f"active: {'true' if i.active else 'false'}, "
+            f"priority: {_rust_opt(i.priority)}, stack_size: {_rust_opt(i.stack)}, "
+            f"queue_size: {_rust_opt(i.queue)}, cpu: {_rust_opt(i.cpu)} }},"
+        )
+    out += ["];", "", f"/// Every connection in `{topology_name}`."]
+    out.append(f"pub const CONNECTIONS: [Connection; {len(connections)}] = [")
+    for c in connections:
+        out.append(
+            "    Connection { "
+            f'graph: "{c.graph}", '
+            f'from: Endpoint {{ instance: "{c.from_inst}", port: "{c.from_port}", '
+            f"number: {_rust_opt(c.from_num)} }}, "
+            f'to: Endpoint {{ instance: "{c.to_inst}", port: "{c.to_port}", '
+            f"number: {_rust_opt(c.to_num)} }} }},"
+        )
+    out += ["];", ""]
+
+    escapes = [(i, name, code) for i in instances for name, code in i.phases]
+    out += [
+        "/// A `phase Fpp.ToCpp.Phases.X` block: literal C++ the model pastes",
+        "/// into the generated topology.",
+        "///",
+        "/// These are the one part of a topology that is **not** mechanical.",
+        "/// Nothing derives them and nothing can translate them; a Rust-native",
+        "/// topology would have to have them rewritten by hand. They are listed",
+        "/// here so that cost is visible rather than discovered later.",
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]",
+        "pub struct PhaseEscape {",
+        "    /// The instance the block is attached to",
+        "    pub instance: &'static str,",
+        "    /// Which setup or teardown phase it runs in",
+        "    pub phase: &'static str,",
+        "    /// The literal C++, verbatim",
+        "    pub code: &'static str,",
+        "}",
+        "",
+        f"/// The {len(escapes)} hand-written C++ escapes in `{topology_name}`.",
+        f"pub const PHASE_ESCAPES: [PhaseEscape; {len(escapes)}] = [",
+    ]
+    for instance, name, code in escapes:
+        out.append(
+            "    PhaseEscape { "
+            f'instance: "{instance.name}", phase: "{name}", '
+            f'code: r#"{code}"# }},'
+        )
+    out += ["];", ""]
+    return "\n".join(out)
+
+
+def _rust_opt(value):
+    return "None" if value is None else f"Some({value})"
+
+
+def verify_against_cpp(path, instances, connections):
+    """Check the resolved facts against the topology `fpp-to-cpp` generated.
+
+    This is the point of the phase. Each assertion is a fact the C++ states
+    explicitly, so a mismatch means the model does *not* determine the
+    topology on its own -- which would be the finding that matters.
+    """
+    text = path.read_text()
+    active = [i for i in instances if i.active]
+    problems = []
+
+    def check(label, expected, actual):
+        if expected != actual:
+            problems.append(f"{label}: model says {expected}, C++ has {actual}")
+        else:
+            print(f"  ok  {label}: {expected}")
+
+    check("instances (.init calls)", len(instances), len(re.findall(r"\.init\(", text)))
+    check(
+        "base IDs (.setIdBase calls)",
+        len(instances),
+        len(re.findall(r"\.setIdBase\(", text)),
+    )
+    check(
+        "connections (set_*_OutputPort calls)",
+        len(connections),
+        len(re.findall(r"set_\w+_OutputPort\(", text)),
+    )
+    # A passive component can still be started by a `phase` block, so the
+    # honest expectation is "active components, plus whatever the escapes do".
+    escape_starts = sum(
+        code.count(".start(")
+        for i in instances
+        for name, code in i.phases
+        if name == "startTasks"
+    )
+    check(
+        "started components (.start calls)",
+        len(active) + escape_starts,
+        len(re.findall(r"\.start\(", text)),
+    )
+    if escape_starts:
+        print(
+            f"  note  {escape_starts} of those come from `phase` blocks, not "
+            f"from a component being active"
+        )
+
+    # Every instance must actually appear, not merely be counted.
+    missing = [i.cpp for i in instances if f"{i.cpp}.init(" not in text]
+    if missing:
+        problems.append(f"instances absent from the C++: {', '.join(missing[:5])}")
+    else:
+        print(f"  ok  every instance appears by name in a .init() call")
+
+    missing_start = [i.cpp for i in active if f"{i.cpp}.start(" not in text]
+    if missing_start:
+        problems.append(
+            f"active instances never started: {', '.join(missing_start[:5])}"
+        )
+    else:
+        print(f"  ok  every active instance appears by name in a .start() call")
+
+    # The setup/teardown ordering is a fact a runtime would have to reproduce.
+    for name, expected in (
+        (
+            "setup",
+            [
+                "initComponents",
+                "configComponents",
+                "setBaseIds",
+                "connectComponents",
+                "regCommands",
+                "readParameters",
+                "loadParameters",
+                "startTasks",
+            ],
+        ),
+        (
+            "teardown",
+            ["stopTasks", "freeThreads", "tearDownComponents", "deinitComponents"],
+        ),
+    ):
+        body = re.search(
+            r"void " + name + r"\(const TopologyState& state\) \{(.*?)\n  \}",
+            text,
+            re.S,
+        )
+        if body is None:
+            problems.append(f"could not find {name}() in the generated C++")
+            continue
+        found = re.findall(r"(\w+)\(", body.group(1))
+        if found != expected:
+            problems.append(f"{name}() order: expected {expected}, C++ has {found}")
+        else:
+            print(f"  ok  {name}() runs {len(expected)} steps in the model's order")
+
+    return problems
+
+
+def emit_topology(ast, analysis, args):
+    """Topology mode: write the tables, and optionally check them against C++."""
+    instances, connections = collect_topology(ast, analysis, args.topology)
+    code = generate_topology_rust(
+        args.topology, instances, connections, args.module_name
+    )
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(code)
+    if shutil.which("rustfmt") is not None:
+        subprocess.run(["rustfmt", "--edition", "2021", str(args.out)], check=True)
+
+    active = sum(1 for i in instances if i.active)
+    print(
+        f"fpp-to-rust: {args.topology} -> {args.out} "
+        f"({len(instances)} instances, {active} active, "
+        f"{len(connections)} connections)"
+    )
+
+    if args.verify_cpp is not None:
+        print(f"verifying against {args.verify_cpp}:")
+        problems = verify_against_cpp(args.verify_cpp, instances, connections)
+        if problems:
+            for problem in problems:
+                print(f"  MISMATCH  {problem}", file=sys.stderr)
+            sys.exit(
+                "fpp-to-rust: the model does not account for the generated "
+                "topology; see the mismatches above"
+            )
+        print("the model accounts for every fact checked in the generated C++")
 
 
 if __name__ == "__main__":

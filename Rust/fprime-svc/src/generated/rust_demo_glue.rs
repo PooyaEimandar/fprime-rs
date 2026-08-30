@@ -11,6 +11,39 @@
 
 use core::ffi::c_void;
 
+use fprime_config::FwSizeType;
+
+/// An `Fw::Buffer` as it crosses the boundary: the triple the C++
+/// object really is. A `ref` parameter's `size` and `context` are
+/// written back to the C++ object after the call; `data` is not,
+/// because `Fw::Buffer::setData` is bounds-checked against the
+/// original allocation and moving it is a different contract.
+#[repr(C)]
+pub struct Buffer {
+    /// Start of the payload
+    pub data: *mut u8,
+    /// Bytes available at `data`
+    pub size: FwSizeType,
+    /// Caller-defined tag carried with the buffer
+    pub context: u32,
+}
+
+impl Buffer {
+    /// The payload as a slice.
+    ///
+    /// # Safety
+    /// Valid only while the C++ `Fw::Buffer` this came from is alive
+    /// and its allocation is unchanged -- i.e. during the port call.
+    pub unsafe fn as_slice(&self) -> &[u8] {
+        if self.size == 0 || self.data.is_null() {
+            &[]
+        } else {
+            // SAFETY: the caller guarantees the buffer outlives this.
+            unsafe { core::slice::from_raw_parts(self.data, self.size as usize) }
+        }
+    }
+}
+
 /// Handlers for each input port of the component.
 ///
 /// Methods take `&self`: sync input ports run on the caller's thread, so
@@ -18,9 +51,79 @@ use core::ffi::c_void;
 /// belongs behind interior mutability.
 pub trait RustDemoHandlers: Sync {
     /// `addIn` (SyncInput)
-    fn add_in(&self, port_num: i32, value: u32);
+    fn add_in(&self, port_num: i32, env: &Env, value: u32);
+    /// `consumeIn` (SyncInput)
+    fn consume_in(&self, port_num: i32, env: &Env, data: &mut Buffer);
+    /// `queryIn` (SyncInput)
+    fn query_in(&self, port_num: i32, env: &Env, kind: u8) -> u32;
     /// `resetIn` (SyncInput)
-    fn reset_in(&self, port_num: i32, seed: u32, enabled: bool);
+    fn reset_in(&self, port_num: i32, env: &Env, seed: u32, enabled: bool);
+    /// `scaleIn` (SyncInput)
+    fn scale_in(&self, port_num: i32, env: &Env, value: &mut u32);
+    /// `SET_TOTAL` command (Sync)
+    ///
+    /// Must answer exactly once with `env.respond(...)`:
+    /// the dispatcher is waiting on it.
+    fn cmd_set_total(&self, env: &Env, opcode: u32, cmd_seq: u32, value: u32);
+}
+
+/// Callbacks into the component instance, for what Rust cannot own.
+///
+/// Built by the generated shim on its own stack for the duration of one
+/// port call. Do not store it.
+#[repr(C)]
+pub struct Env {
+    /// The C++ component instance the callbacks act on
+    pub component: *mut c_void,
+    /// Emit the `ExceededSeed` event (WarningLow)
+    pub exceeded_seed: Option<unsafe extern "C" fn(*mut c_void, u32, u32)>,
+    /// Write the `Total` telemetry channel
+    pub tlm_total: Option<unsafe extern "C" fn(*mut c_void, u32)>,
+    /// Answer a command. Every command handler must call this
+    /// exactly once: the dispatcher is waiting on it.
+    pub cmd_response: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32)>,
+}
+
+/// The command responses the dispatcher understands.
+pub mod cmd_response {
+    /// `Fw::CmdResponse::OK`
+    pub const OK: u32 = 0;
+    /// `Fw::CmdResponse::INVALID_OPCODE`
+    pub const INVALID_OPCODE: u32 = 1;
+    /// `Fw::CmdResponse::VALIDATION_ERROR`
+    pub const VALIDATION_ERROR: u32 = 2;
+    /// `Fw::CmdResponse::FORMAT_ERROR`
+    pub const FORMAT_ERROR: u32 = 3;
+    /// `Fw::CmdResponse::EXECUTION_ERROR`
+    pub const EXECUTION_ERROR: u32 = 4;
+    /// `Fw::CmdResponse::BUSY`
+    pub const BUSY: u32 = 5;
+}
+
+impl Env {
+    /// Emit `ExceededSeed`; a no-op if the shim left it unset.
+    pub fn exceeded_seed(&self, total: u32, seed: u32) {
+        if let Some(emit) = self.exceeded_seed {
+            // SAFETY: the shim installs a function valid for the
+            // component pointer it paired with it.
+            unsafe { emit(self.component, total, seed) };
+        }
+    }
+    /// Write `Total`; a no-op if the shim left it unset.
+    pub fn tlm_total(&self, value: u32) {
+        if let Some(write) = self.tlm_total {
+            // SAFETY: the shim installs a function valid for the
+            // component pointer it paired with it.
+            unsafe { write(self.component, value) };
+        }
+    }
+    /// Answer a command, with one of the `cmd_response` constants.
+    pub fn respond(&self, opcode: u32, cmd_seq: u32, response: u32) {
+        if let Some(respond) = self.cmd_response {
+            // SAFETY: as above.
+            unsafe { respond(self.component, opcode, cmd_seq, response) };
+        }
+    }
 }
 
 /// The opaque instance pointer to hand to `setRustHandlers`.
@@ -49,33 +152,142 @@ unsafe fn handlers_from(handlers: *const c_void) -> Option<&'static dyn RustDemo
 ///
 /// # Safety
 /// `handlers` must be a pointer produced by [`handler_ptr`], or null.
+/// `env` must point to a live Env for the calling instance.
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_rustdemo_addIn(
     handlers: *const c_void,
     port_num: i32,
+    env: *const Env,
     value: u32,
 ) {
     // SAFETY: forwarded unchanged from the shim, which stores only
     // pointers produced by `handler_ptr`.
     if let Some(handlers) = unsafe { handlers_from(handlers) } {
-        handlers.add_in(port_num, value);
+        // SAFETY: the shim builds the Env on its own stack
+        // and it outlives this call.
+        let env = unsafe { &*env };
+        handlers.add_in(port_num, env, value);
     }
+}
+
+/// Dispatch stub for `consumeIn`, called by the generated C++ shim.
+///
+/// # Safety
+/// `handlers` must be a pointer produced by [`handler_ptr`], or null.
+/// `env` must point to a live Env for the calling instance.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rustdemo_consumeIn(
+    handlers: *const c_void,
+    port_num: i32,
+    env: *const Env,
+    data: *mut Buffer,
+) {
+    // SAFETY: forwarded unchanged from the shim, which stores only
+    // pointers produced by `handler_ptr`.
+    if let Some(handlers) = unsafe { handlers_from(handlers) } {
+        // SAFETY: the shim builds the Env on its own stack
+        // and it outlives this call.
+        let env = unsafe { &*env };
+        // SAFETY: a `ref` parameter arrives as a pointer the
+        // C++ side owns for the duration of this call.
+        let data = unsafe { &mut *data };
+        handlers.consume_in(port_num, env, data);
+    }
+}
+
+/// Dispatch stub for `queryIn`, called by the generated C++ shim.
+///
+/// # Safety
+/// `handlers` must be a pointer produced by [`handler_ptr`], or null.
+/// `env` must point to a live Env for the calling instance.
+///
+/// A null `handlers` yields `u32::default()`: a component whose
+/// handlers were never installed answers with a zero rather than
+/// dereferencing.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rustdemo_queryIn(
+    handlers: *const c_void,
+    port_num: i32,
+    env: *const Env,
+    kind: u8,
+) -> u32 {
+    // SAFETY: forwarded unchanged from the shim, which stores only
+    // pointers produced by `handler_ptr`.
+    if let Some(handlers) = unsafe { handlers_from(handlers) } {
+        // SAFETY: the shim builds the Env on its own stack
+        // and it outlives this call.
+        let env = unsafe { &*env };
+        return handlers.query_in(port_num, env, kind);
+    }
+    u32::default()
 }
 
 /// Dispatch stub for `resetIn`, called by the generated C++ shim.
 ///
 /// # Safety
 /// `handlers` must be a pointer produced by [`handler_ptr`], or null.
+/// `env` must point to a live Env for the calling instance.
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_rustdemo_resetIn(
     handlers: *const c_void,
     port_num: i32,
+    env: *const Env,
     seed: u32,
     enabled: bool,
 ) {
     // SAFETY: forwarded unchanged from the shim, which stores only
     // pointers produced by `handler_ptr`.
     if let Some(handlers) = unsafe { handlers_from(handlers) } {
-        handlers.reset_in(port_num, seed, enabled);
+        // SAFETY: the shim builds the Env on its own stack
+        // and it outlives this call.
+        let env = unsafe { &*env };
+        handlers.reset_in(port_num, env, seed, enabled);
+    }
+}
+
+/// Dispatch stub for `scaleIn`, called by the generated C++ shim.
+///
+/// # Safety
+/// `handlers` must be a pointer produced by [`handler_ptr`], or null.
+/// `env` must point to a live Env for the calling instance.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rustdemo_scaleIn(
+    handlers: *const c_void,
+    port_num: i32,
+    env: *const Env,
+    value: *mut u32,
+) {
+    // SAFETY: forwarded unchanged from the shim, which stores only
+    // pointers produced by `handler_ptr`.
+    if let Some(handlers) = unsafe { handlers_from(handlers) } {
+        // SAFETY: the shim builds the Env on its own stack
+        // and it outlives this call.
+        let env = unsafe { &*env };
+        // SAFETY: a `ref` parameter arrives as a pointer the
+        // C++ side owns for the duration of this call.
+        let value = unsafe { &mut *value };
+        handlers.scale_in(port_num, env, value);
+    }
+}
+
+/// Dispatch stub for the `SET_TOTAL` command.
+///
+/// # Safety
+/// `handlers` must come from [`handler_ptr`], or be null; `env`
+/// must point to a live Env for the calling instance.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rustdemo_cmd_SET_TOTAL(
+    handlers: *const c_void,
+    env: *const Env,
+    opcode: u32,
+    cmd_seq: u32,
+    value: u32,
+) {
+    // SAFETY: forwarded unchanged from the shim.
+    if let Some(handlers) = unsafe { handlers_from(handlers) } {
+        // SAFETY: the shim builds the Env on its own stack and it
+        // outlives this call.
+        let env = unsafe { &*env };
+        handlers.cmd_set_total(env, opcode, cmd_seq, value);
     }
 }

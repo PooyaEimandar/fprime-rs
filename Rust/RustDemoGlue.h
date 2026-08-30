@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <Fw/FPrimeBasicTypes.h>
+
 // Each stub carries the component INSTANCE as an opaque pointer, obtained
 // from the Rust side's handler_ptr() and installed with the component's
 // setRustHandlers(). A null pointer makes the call a no-op, so a component
@@ -16,11 +18,43 @@
 extern "C" {
 #endif
 
+//! An Fw::Buffer as it crosses the boundary.
+//!
+//! Fw::Buffer derives Fw::Serializable, so the object has a vtable
+//! and cannot cross extern "C" -- but it is really this triple, and
+//! the shim marshals it in and (for a `ref` parameter) back out.
+typedef struct {
+    uint8_t* data;
+    FwSizeType size;
+    uint32_t context;
+} FprimeRsBuffer;
+
+//! Callbacks into the component, for what Rust cannot own.
+//! The shim fills these in for the duration of one port call.
+typedef struct fprime_rs_rustdemo_Env {
+    void* component;
+    void (*exceeded_seed)(void* component, uint32_t total, uint32_t seed);
+    void (*tlm_total)(void* component, uint32_t value);
+    void (*cmd_response)(void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response);
+} fprime_rs_rustdemo_Env;
+
 //! Dispatch `addIn` (SyncInput) into the Rust handler
-void fprime_rs_rustdemo_addIn(const void* handlers, int32_t portNum, uint32_t value);
+void fprime_rs_rustdemo_addIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, uint32_t value);
+
+//! Dispatch `consumeIn` (SyncInput) into the Rust handler
+void fprime_rs_rustdemo_consumeIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, FprimeRsBuffer* data);
+
+//! Dispatch `queryIn` (SyncInput) into the Rust handler
+uint32_t fprime_rs_rustdemo_queryIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, uint8_t kind);
 
 //! Dispatch `resetIn` (SyncInput) into the Rust handler
-void fprime_rs_rustdemo_resetIn(const void* handlers, int32_t portNum, uint32_t seed, bool enabled);
+void fprime_rs_rustdemo_resetIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, uint32_t seed, bool enabled);
+
+//! Dispatch `scaleIn` (SyncInput) into the Rust handler
+void fprime_rs_rustdemo_scaleIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, uint32_t* value);
+
+//! Dispatch the `SET_TOTAL` command into Rust
+void fprime_rs_rustdemo_cmd_SET_TOTAL(const void* handlers, const fprime_rs_rustdemo_Env* env, uint32_t opcode, uint32_t cmdSeq, uint32_t value);
 
 #ifdef __cplusplus
 }

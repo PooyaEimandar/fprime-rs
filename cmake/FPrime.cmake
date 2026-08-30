@@ -211,7 +211,13 @@ function(fprime_setup_included_code)
     if (BUILD_TESTING)
         fprime_util_metadata_add_test(".*")
     endif()
-    set(_FP_CORE_PACKAGES Fpp default Fw Svc Os Drv CFDP Utils)
+    # `Rust` is a core package like the rest: without it here, a project that
+    # consumes F Prime via find_package never processes Rust/CMakeLists.txt and
+    # silently gets the C++ implementations, whatever its FPRIME_RUST_IMPL_*
+    # settings say. Rust/enable.cmake is still included separately and earlier
+    # (see the root CMakeLists.txt), because Fw/Os/Svc read FPRIME_RS_AVAILABLE
+    # while selecting their sources -- long before this list is walked.
+    set(_FP_CORE_PACKAGES Fpp default Fw Svc Os Drv CFDP Utils Rust)
     foreach (_FP_PACKAGE_DIR IN LISTS _FP_CORE_PACKAGES)
         set(FPRIME_CURRENT_MODULE "${_FP_PACKAGE_DIR}")
         fprime_util_metadata_add_subdirectory("${FPRIME_FRAMEWORK_PATH}/${_FP_PACKAGE_DIR}/" "${CMAKE_BINARY_DIR}/F-Prime/${_FP_PACKAGE_DIR}")

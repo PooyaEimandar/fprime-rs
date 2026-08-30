@@ -24,6 +24,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fprime-selftest"
+version = "0.1.0"
+dependencies = [
+ "fprime-config",
+ "fprime-core",
+ "fprime-svc",
+ "fprime-utils",
+]
+
+[[package]]
 name = "fprime-svc"
 version = "0.1.0"
 dependencies = [

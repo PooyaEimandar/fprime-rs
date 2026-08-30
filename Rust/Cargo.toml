@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["fprime-config", "fprime-core", "fprime-ffi", "fprime-svc", "fprime-utils"]
+members = [
+    "fprime-config",
+    "fprime-core",
+    "fprime-ffi",
+    "fprime-selftest",
+    "fprime-svc",
+    "fprime-utils",
+]
 
 [workspace.package]
 version = "0.1.0"

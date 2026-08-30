@@ -20,5 +20,7 @@ fprime_add_validation_flags()
 include("${CMAKE_CURRENT_LIST_DIR}/Rust/enable.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/FPrime-Code.cmake")
 
-# Rust crates and their C++ interop shims
-add_fprime_subdirectory("${CMAKE_CURRENT_LIST_DIR}/Rust/")
+# Rust/ is registered as a core package in cmake/FPrime.cmake, alongside Fw and
+# Os, so that find_package consumers get it too. Only enable.cmake is included
+# here, and it must be: the framework modules read FPRIME_RS_AVAILABLE while
+# choosing their sources.

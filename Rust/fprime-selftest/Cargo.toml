@@ -1,0 +1,15 @@
+[package]
+name = "fprime-selftest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A running executable built from the F Prime Rust crates alone, with no C++ linked"
+
+[dependencies]
+fprime-config = { path = "../fprime-config" }
+fprime-core = { path = "../fprime-core" }
+fprime-utils = { path = "../fprime-utils" }
+fprime-svc = { path = "../fprime-svc" }
+
+[lints]
+workspace = true

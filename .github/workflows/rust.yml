@@ -13,6 +13,8 @@ on:
       - "Os/SandboxedFile.cpp"
       - "Os/Generic/**"
       - "Os/CMakeLists.txt"
+      - "cmake/FPrime.cmake"
+      - "TestDeploymentsProject/Ref/Top/**"
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
@@ -42,6 +44,8 @@ on:
       - "Os/SandboxedFile.cpp"
       - "Os/Generic/**"
       - "Os/CMakeLists.txt"
+      - "cmake/FPrime.cmake"
+      - "TestDeploymentsProject/Ref/Top/**"
       - "Utils/Types/**"
       - "Utils/Hash/**"
       - "CFDP/Checksum/**"
@@ -90,6 +94,18 @@ jobs:
         run: cargo test --workspace --exclude fprime-ffi
       - name: Build staticlib (release, panic=abort)
         run: cargo build --release
+      - name: Cargo-only binary links no C++
+        # Phase 10: the first artifact built from these crates alone. Until it
+        # existed the workspace could not produce anything that linked without
+        # a C++ object (fprime-ffi's panic handler calls into RustPanicHook.cpp),
+        # which made "cargo-only" untestable. Assert it stays that way.
+        run: |
+          cargo run -p fprime-selftest
+          if ldd target/debug/fprime-selftest | grep -Ei "libstdc\+\+|libc\+\+"; then
+            echo "::error::the cargo-only binary linked a C++ runtime"
+            exit 1
+          fi
+          echo "no C++ runtime in the link"
       - name: Generated config is up to date
         working-directory: .
         run: |
@@ -118,6 +134,53 @@ jobs:
         # tie-break, a moved buffer boundary -- are still caught.
         working-directory: .
         run: python3 tools/fprime-rs/test_shimgen.py
+  topology-check:
+    # Phase 11: the resolved FPP topology must account for every fact in the
+    # topology `fpp-to-cpp` generates -- instance count, base IDs, all 357
+    # connections, which components start, and the setup/teardown ordering. If
+    # it stops accounting for one, the topology is not fully derivable from the
+    # model, which is the thing a Rust-native topology would depend on.
+    #
+    # Cheap by construction: this autocodes the topology only. Nothing is
+    # compiled and nothing is linked.
+    name: topology is derivable from the model
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install fprime tools
+        run: |
+          python3 -m venv fprime-venv
+          . fprime-venv/bin/activate
+          pip install -q -r requirements.txt
+      - name: Generate the Ref build cache
+        working-directory: TestDeploymentsProject
+        run: |
+          . ../fprime-venv/bin/activate
+          fprime-util generate
+      - name: Autocode the topology (no compilation)
+        run: |
+          . fprime-venv/bin/activate
+          ninja -C TestDeploymentsProject/build-fprime-automatic-native \
+            Ref/Top/RefTopologyAc.cpp
+      - name: The model accounts for the generated topology
+        run: |
+          . fprime-venv/bin/activate
+          B=TestDeploymentsProject/build-fprime-automatic-native/Ref/Top
+          python3 tools/fprime-rs/fpp_to_rust.py \
+            --module-name "TestDeploymentsProject/Ref/Top/topology.fpp" \
+            --topology "Ref.Ref" --out /tmp/ref_topology.rs \
+            --verify-cpp "$B/RefTopologyAc.cpp" \
+            $(tr ';' '\n' < "$B/fpp-import-list") \
+            $(tr ';' '\n' < "$B/fpp-source-list")
+      - name: The emitted topology is valid Rust
+        run: rustc --edition 2021 --crate-type lib --emit=metadata -o /tmp/topo.rmeta /tmp/ref_topology.rs
+
   framework-check:
     # Builds the C++ framework with the Rust implementations selected and runs
     # the affected unit-test suites (the equivalence oracles): the codec
@@ -174,6 +237,10 @@ jobs:
             --out-shim /tmp/RustDemoShim.cpp \
             --shim-include "Svc/RustDemo/RustDemo.hpp" \
             --glue-include "Rust/RustDemoGlue.h" \
+            cmake/platform/unix/Platform/PlatformTypes.fpp \
+            default/config/FpConfig.fpp default/config/ComCfg.fpp \
+            Fw/Buffer/Buffer.fpp Fw/Log/Log.fpp Fw/Time/Time.fpp \
+            Fw/Cmd/Cmd.fpp Fw/Tlm/Tlm.fpp \
             Svc/RustDemo/RustDemoPorts.fpp Svc/RustDemo/RustDemo.fpp
           diff -u Rust/fprime-svc/src/generated/rust_demo_glue.rs /tmp/rust_demo_glue.rs
           diff -u Svc/RustDemo/RustDemoShim.cpp /tmp/RustDemoShim.cpp

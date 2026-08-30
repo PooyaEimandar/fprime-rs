@@ -117,6 +117,16 @@ All unsafe code is confined to two places, both by design:
   overlap-tolerant per-byte copies matching the C++ loops they mirror, and a
   strided view over a C++-resident entry array.
 
+Phases 12 and 13 add unsafe to *generated* code for the first time. The
+component glue now dereferences two kinds of caller-owned pointer: a `ref`
+parameter (`&mut *value`) and an `Fw::Buffer`'s payload
+(`slice::from_raw_parts`). Both are valid only for the duration of the port
+call, which is exactly the scope they are created in, and the generator emits
+a SAFETY comment on each — the workspace lints require it, so a generator
+change that dropped one would fail the build rather than pass quietly. The
+buffer's `as_slice` is `unsafe fn` rather than safe, because its validity
+depends on the C++ object outliving the call, which Rust cannot check.
+
 The Phase 9 OSAL work adds **one** new unsafe pattern: `c_str`/`c_str_len` in
 `fprime-ffi` take a C string whose length the caller does not pass, scan it
 byte by byte for the terminator, and only then build a slice of the length

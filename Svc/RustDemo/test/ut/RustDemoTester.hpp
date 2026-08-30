@@ -26,6 +26,31 @@ class RustDemoTester : public RustDemoGTestBase {
     //! Drive resetIn, which the generated glue forwards into Rust
     void reset(U32 seed, bool enabled);
 
+    //! Drive queryIn, whose value comes back across the FFI and whose
+    //! parameter is an FPP enum
+    U32 query(RustDemoKind kind);
+
+    //! Drive scaleIn; returns what Rust wrote back through the `ref`
+    U32 scale(U32 value);
+
+    //! Drive consumeIn with a real buffer; returns the buffer afterwards so
+    //! the test can see what Rust wrote back
+    Fw::Buffer consume(U8* data, FwSizeType size);
+
+    //! The autocoded GTest base declares its assertion helpers protected, so
+    //! surface the two this suite needs.
+    void assertExceededSeed(U32 index, U32 total, U32 seed);
+    void assertEventCounts(U32 all, U32 exceededSeed);
+
+    //! Send SET_TOTAL and let Rust answer the dispatcher
+    void sendSetTotal(U32 value);
+
+    //! Assert the command response Rust produced
+    void expectCmdResponse(Fw::CmdResponse expected);
+
+    //! Assert the Total channel Rust wrote
+    void assertTotalChannel(U32 count, U32 value);
+
   private:
     //! Declared here, DEFINED by the autocoded helpers (UT_AUTO_HELPERS)
     //! against the `component` member below

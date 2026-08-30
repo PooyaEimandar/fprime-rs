@@ -301,6 +301,218 @@ mixed C++/Rust deployments working at every step.
       unblocks `Svc::ApidManager` — 156 lines of pure enum/integer table
       lookup with 272 lines of tests, the best available proving ground), then
       `ref` parameters for serializable types
-- [ ] **Phase 10 — Drop the C++ toolchain** (per deployment): no fpp-to-cpp, no
-      C++ objects, cargo-only build
+- [~] **Phase 10 — partial, and the goal as stated is not reachable.** The
+      exit criterion was a cargo-only deployment: no fpp-to-cpp, no C++
+      objects. Measured against `TestDeploymentsProject/Ref`'s actual link
+      line, that means replacing **261,923 lines of C++** (398 sources,
+      524 headers), of which **81.7% is fpp-to-cpp autocode**. The autocode
+      is not a windfall: **117,232 of those lines are the 41 `ComponentAc`
+      classes** — the dispatch loops, queue consumption, and
+      command/telemetry/event/parameter machinery — and *nothing in this tree
+      generates any of it*. `RefTopologyAc.cpp` alone is 15,530 lines from a
+      582-line model. The whole Rust workspace is ~5,600 lines, `no_std`, with
+      no threads, no allocator and no OSAL. This phase is not one more
+      increment; it is a component runtime plus three generators.
+
+      Two measurements cut the other way and are worth recording. The **GDS
+      dictionary is already free**: `fpp-to-dict` builds Ref's 398 KB
+      dictionary from FPP models with zero object files, so a cargo-only
+      deployment would keep its ground-system link provided FPP stays the
+      source of truth. And **fpp-to-json already exposes the whole resolved
+      topology** — 55 instances with baseId/priority/stack/queue/cpu, and all
+      357 connections with resolved port numbers — so the topology half is
+      mechanical, and checkable against an oracle that already exists.
+
+      **What this phase actually delivered.**
+
+      - **A cargo-only binary that links no C++ at all**
+        (`Rust/fprime-selftest`). Until it existed the claim was
+        *unfalsifiable from inside the repository*: `fprime-ffi` is a
+        staticlib whose panic handler calls `fprime_rs_panic_hook`, defined in
+        24 lines of C++, so nothing the workspace built could link alone. The
+        binary exercises serialization, CRC32, the CFDP checksum, the OSAL max
+        heap and path containment, and CI asserts its link contains no C++
+        runtime. It is **not** a deployment — no runtime, no OSAL, no topology
+        — but "does a cargo-only build produce a working binary" is now a
+        question with a checkable answer.
+      - **The component generator can carry a real component's ports.** Phase
+        7's generator refused every in-tree component; Phase 9 measured the
+        reachable count at zero. It now supports **return values**, **FPP enum
+        parameters**, and **emitting events from Rust**. Counted directly, the
+        tree has four pre-existing port definitions with return types
+        (`ApidSequenceCount`, `SdlsKey`, `GetParameter`, `NoArgsReturn`);
+        three are now expressible, and `SdlsKey` is not — it takes a `ref`
+        buffer and returns an enum, both still refused. Verified two ways:
+        `Svc/RustDemo` exercises
+        all three end to end through its real ports, and the generator's
+        output for `Svc::Ccsds::ApidManager` — a real in-tree component —
+        **compiles against its real autocoded base**, enum parameter passed as
+        `.e`, event emitted through a captureless lambda reaching the base's
+        protected emitter.
+
+      Enum parameters work because an FPP enum compiles to a *polymorphic*
+      class (16 bytes, vptr, non-standard-layout) that cannot cross
+      `extern "C"` — but its `.e` member is exactly the repr the typeMap
+      already reports, so there is nothing to marshal. Events cannot be
+      emitted by Rust alone: the autocoded base owns the time port and the
+      event buffer, so they go back out through a generated `Env` vtable the
+      shim fills per call.
+
+      **What still blocks a real component**, beyond the runtime: the handler
+      pointer needs somewhere to live, and an upstream component has no such
+      member — wiring `ApidManager` would mean editing its header, which is
+      upstream surgery this phase did not do. Ports carrying `Fw::Buffer`,
+      structs or arrays are still refused, as are commands, telemetry and
+      parameters.
+
+      **What Phase 10 was, and what happens to it.** The goal — a cargo-only
+      deployment — was never a tenth step of the same size as the nine before
+      it; the original plan estimated 2.5–3 years solo to a first all-Rust
+      deployment, and Phases 0–9 each fit in a sitting. Treating them as
+      comparable was the planning error. The goal is not abandoned: it is
+      **Phase 20** below, and Phases 11–19 are the steps that reach it, each
+      with its own exit criterion and its own oracle.
+
+## The road to a cargo-only deployment
+
+Phases 11–20 replace the single Phase 10 goal. They are ordered by what
+unblocks what, not by size, and the size column is deliberately honest: the
+first three are sittings, the middle ones are not, and pretending otherwise is
+what produced a partial Phase 10.
+
+Every phase names the thing that tells you it worked. Where an oracle already
+exists in the tree — a generated C++ file to diff against, a component's own
+unit-test suite — the phase is built around it, because that is what made
+Phases 1–9 verifiable and Phase 10 not.
+
+- [x] **Phase 11 — Topology as data.** `fpp_to_rust.py --topology` reads the
+      resolved topology out of `fpp-to-json` and emits it as Rust data: the
+      instance table (base ID, priority, stack, queue, CPU, and whether the
+      component is active) and every connection with its resolved port
+      numbers. `--verify-cpp` then checks those facts against the topology
+      `fpp-to-cpp` generated. Nothing links and nothing runs — the deliverable
+      is the answer, not the module.
+
+      **The answer: the topology is mechanical, apart from one escape hatch.**
+      Every fact checked in `RefTopologyAc.cpp` — 15,530 lines from a 582-line
+      model — is derivable from the model: 48 instances, 48 base IDs, **357
+      connections**, 21 started components, and the ordering of its 8-step
+      `setup()` and 4-step `teardown()`. The emitted module compiles.
+
+      The exception is `phase Fpp.ToCpp.Phases.X """..."""`
+      blocks: literal C++ pasted into the generated topology. Ref has **23**
+      of them across six phases. Nothing derives them and nothing can
+      translate them — a Rust-native topology would need them rewritten by
+      hand — so the generator emits them as a `PHASE_ESCAPES` table with the
+      C++ verbatim, to make that cost visible now rather than at porting time.
+
+      One of them is why this phase was worth doing before the runtime.
+      `CdhCore::version` is a **passive** component that the topology
+      nonetheless starts, because a `startTasks` block says
+      `CdhCore::version.start()`. A runtime built on "active components get a
+      thread, passive ones don't" would be wrong about Ref on day one. The
+      verification caught it as a 20-vs-21 mismatch, which is exactly the
+      class of assumption this phase existed to test.
+
+      Folded in: `Rust` is now a core package in `cmake/FPrime.cmake`
+      alongside `Fw` and `Os`. It was absent, so any project consuming F´ via
+      `find_package` never processed `Rust/CMakeLists.txt` and silently got
+      the C++ implementations whatever its `FPRIME_RUST_IMPL_*` settings said.
+
+- [~] **Phase 12 — partial: the two port shapes that matter most.** Counted
+      across `Fw`, `Svc` and `Drv`, the framework's port definitions have 79
+      parameters. **20 are `ref`** and **10 are `Fw.Buffer`** — the two largest
+      groups after primitives, and the generator now carries both.
+
+      A `ref` parameter crosses as a pointer and the handler takes `&mut T`,
+      so what Rust writes is what the caller sees. `Fw::Buffer` cannot cross
+      as an object — it derives `Fw::Serializable`, so it has a vtable — but
+      it is really `(data, size, context)`, and the shim marshals that triple
+      in and writes `size` and `context` back. It deliberately does not write
+      `data` back: `Fw::Buffer::setData` is bounds-checked against the
+      original allocation, and letting Rust move the pointer would be a
+      different contract than the class documents.
+
+      **Not done:** FPP structs and arrays as port parameters are still
+      refused, and so is the **handler-pointer problem** — the generated shim
+      calls `this->m_rustHandlers`, which an upstream component has no member
+      for, so a real component still cannot be wired without editing its
+      header. That is the remaining blocker for using any of this outside the
+      demo component.
+
+- [~] **Phase 13 — partial: commands and telemetry, not parameters.** A
+      command was what made a generated shim *abstract*: the autocoded base
+      leaves `<NAME>_cmdHandler` pure virtual, so a component with a command
+      could not be generated at all. Rust now implements it, and answers the
+      dispatcher itself — `env.respond(opcode, cmd_seq, cmd_response::OK)` —
+      because the status a command returns is a decision, and decisions are
+      what moved to Rust. Telemetry goes the same way: the autocoded base owns
+      the channel ID and the time tag, so `env.tlm_<Channel>(value)` calls
+      back out.
+
+      `Svc/RustDemo` now exercises the whole surface end to end in 11 tests —
+      primitives, bools, an enum parameter, a return value, a `ref`
+      parameter, a `ref Fw::Buffer`, an event, a command answered `OK`, a
+      command **rejected** with `VALIDATION_ERROR`, and a telemetry channel.
+
+      **Not done:** parameters (`paramGet`/`paramSet`) are not carried, and
+      the target was the demo component rather than a real framework one,
+      because of the handler-pointer blocker above. Phase 13's stated exit
+      criterion — "one real in-tree component with a command and a channel
+      runs its logic in Rust, its own suite green" — is **not** met.
+
+- [ ] **Phase 14 — `Fw` core types in Rust** *(weeks)*. What Phase 8 claimed
+      and did not deliver: `Fw::Buffer`, the string types, `Fw::Time`,
+      `PolyType`, and the Com/Cmd/Tlm/Log packet types as canonical Rust, with
+      C++ consuming them. ~15,890 hand-written lines, plus the ~53,015-line
+      Enum/Serializable/Array/Constants tier that Phase 4 already showed is
+      mechanical.
+      **Exit:** `Fw`'s data types are Rust; the C++ definitions are wrappers.
+      **Oracle:** the `Fw` unit-test suites, plus the existing differential UT.
+
+- [ ] **Phase 15 — The OSAL syscall layer** *(weeks)*. `Os::File`,
+      `FileSystem`, `Directory`, `Task`, `Mutex`, `Queue`, `RawTime` in Rust
+      behind the existing delegate interfaces. Mostly libc bindings: Rust
+      `std` is usable only on hosted targets and drops flight-critical
+      properties there — priority inheritance, scheduling policy, CPU
+      affinity, `CLOCK_MONOTONIC` selection — so expect raw `pthread`.
+      **Exit:** a deployment runs with the Rust OSAL selected. **Oracle:** the
+      `Os` suites, which are already implementation-independent.
+
+- [ ] **Phase 16 — The component runtime** *(months — this is the project)*.
+      A Rust-native equivalent of `ActiveComponentBase`/`QueuedComponentBase`:
+      one thread per active component, a bounded priority queue, the dispatch
+      loop, port invocation, and the serialization of port arguments into
+      queue messages. For Ref that is 21 threads, 21 queues, 13 mutexes.
+      **Exit:** one active component runs end to end on the Rust runtime with
+      C++ only at the topology edge. **Oracle:** that component's suite.
+
+- [ ] **Phase 17 — Generate the component bases** *(months)*. Extend
+      `fpp_to_rust` to emit what `fpp-to-cpp` emits for a component: the
+      117,232 lines of `ComponentAc` across Ref's 41 components. Event
+      emission alone is 28.8% of that (82 generated lines per event), so it
+      is the first target, and telemetry (32 lines each) the second.
+      **Exit:** generated Rust bases for a stated set of components.
+      **Oracle:** behavioral equivalence against the C++ base, component
+      suite by component suite.
+
+- [ ] **Phase 18 — A Rust-native deployment** *(weeks, once 16 and 17 land)*.
+      Not Ref: a small purpose-built topology — two or three components, a
+      rate group, a comms path — that builds and runs cargo-only. The GDS
+      dictionary comes free, since `fpp-to-dict` already builds it from FPP
+      with no C++ involved.
+      **Exit:** a deployment that talks to the ground system with no C++
+      object in its link. This is the first honest realization of what
+      Phase 10 asked for.
+
+- [ ] **Phase 19 — Ref's long tail** *(months)*. Port the framework
+      components Ref actually instantiates. Phase 9 measured the reachable
+      count at zero with the tooling of the time; after Phases 12, 13 and 17
+      that number is what decides whether this is tractable or whether Ref
+      needs a reduced topology.
+
+- [ ] **Phase 20 — Ref, cargo-only** *(the original Phase 10)*. No
+      fpp-to-cpp, no C++ objects. 261,923 lines replaced.
+      **Exit:** `cargo build` produces a Ref-equivalent binary that passes the
+      existing Ref GDS integration tests.
 
