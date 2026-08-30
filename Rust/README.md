@@ -10,9 +10,14 @@ mixed C++/Rust deployments working at every step.
       CMake/cargo integration, differential UT green under `fprime-util check`
 - [x] **Phase 1 — Foundation libraries**: CircularBuffer byte engine, CRC32,
       and CFDP checksum in Rust behind unchanged C++ headers, existing UTs as
-      oracle; per-module `FPRIME_RUST_IMPL_*` rollback switches proven both
-      ways (Queue's orchestration stays C++ atop the Rust engine — its header
-      encapsulation blocks direct porting until Phase 4 codegen)
+      oracle; per-module `FPRIME_RUST_IMPL_*` rollback switches, whose OFF
+      position CI *builds* but does not test — no suite is ever run against a
+      C++ original, and the OFF side is reached only through the global
+      `FPRIME_ENABLE_RUST=OFF`, never a per-module switch. Queue's
+      orchestration stays C++; an earlier note here said Phase 4 codegen would
+      unblock it, which was never true — `Utils/Types` has no FPP model at all,
+      so the type generator was never a route to it. Queue and `SpscQueue`
+      remain untouched
 - [x] **Phase 2 — First components**: `Svc/FprimeDeframer` and
       `Svc/FprimeFramer` logic in Rust (`fprime-svc` crate) behind unchanged
       component classes; the framer calls the `bufferAllocate` returning port
@@ -42,10 +47,22 @@ mixed C++/Rust deployments working at every step.
       clauses, a nine-member struct with defaults, nested enums, bools, several
       integer widths), each compared default-constructed, round-tripped, and on
       `SERIALIZED_SIZE`, in both endianness modes. **Not yet covered by a
-      differential test:** arrays, floats, 64-bit members, and member arrays —
-      the generator handles them and they have generator-level tests, but no
-      byte-for-byte comparison against autocode. String members are refused
-      with a clear error. The retrofit onto generated types is the deframer's
+      differential test:** arrays, floats, 64-bit members, member arrays and
+      structs-of-structs. The generator emits all of them, but nothing pins
+      them: there is **no test of `fpp_to_rust.py` at all** (the only generator
+      test in the tree, `test_shimgen.py`, covers the three shim generators),
+      and no checked-in generated module contains an array, a float or a
+      64-bit member. The primitive codec underneath *is* differentially pinned
+      for U64/I64/F32/F64 — the gap is generated *types* carrying them.
+
+      The dominant real-world refusal is not strings but **array sizes given
+      by a named constant**: the generator requires an integer literal, and
+      every one of the 11 `array` definitions in `Fw`/`Svc`/`Drv`/`Ref` uses a
+      constant. FPP's own `valueMap` already resolves these — it is what Phase
+      4 used for defaults — so this is a small fix that has simply never been
+      made. Strings, abstract types as struct members (`Fw.Buffer` in
+      `CommsPorts` and `Fw/Dp`), and defaults on struct- or array-typed members
+      are also refused. The retrofit onto generated types is the deframer's
       header parse and the protocol size constants; the trailer read and the
       framer's writes are still hand-rolled.
 - [~] **Phase 5 — partial**: what moved to Rust is ComQueue's *priority-selection
@@ -241,7 +258,7 @@ mixed C++/Rust deployments working at every step.
 - [~] **Phase 9 — partial: `Os/Generic` and path safety in Rust.** Two OSAL
       pieces move, chosen because they are algorithm rather than syscall:
 
-      - **`Types::MaxHeap`** (`Os/Generic/Types/`, 260 → 121 lines) — the
+      - **`Types::MaxHeap`** (`Os/Generic/Types/`, 260 → 126 lines) — the
         stable max heap that orders *every* message queued to an active
         component, through `Os::Generic::PriorityQueue` (the platform default
         queue on Linux and Darwin) and `PriorityMemQueue`. Rust owns push,
@@ -251,7 +268,7 @@ mixed C++/Rust deployments working at every step.
         asserts size, alignment and every field offset against the layout Rust
         reports, once per heap creation: a disagreement would corrupt a queue
         rather than fail.
-      - **`Os::FilePathUtils`** (213 → 85 lines) — resolution and containment:
+      - **`Os::FilePathUtils`** (213 → 95 lines) — resolution and containment:
         the code deciding whether a path the spacecraft was *told* to open
         stays inside the directory it is allowed to touch. Pure character
         arithmetic, no filesystem access. `resolveFromCwd` stays C++ because
@@ -319,7 +336,7 @@ mixed C++/Rust deployments working at every step.
       dictionary from FPP models with zero object files, so a cargo-only
       deployment would keep its ground-system link provided FPP stays the
       source of truth. And **fpp-to-json already exposes the whole resolved
-      topology** — 55 instances with baseId/priority/stack/queue/cpu, and all
+      topology** — 48 instances with baseId/priority/stack/queue/cpu, and all
       357 connections with resolved port numbers — so the topology half is
       mechanical, and checkable against an oracle that already exists.
 
@@ -414,10 +431,21 @@ Phases 1–9 verifiable and Phase 10 not.
       verification caught it as a 20-vs-21 mismatch, which is exactly the
       class of assumption this phase existed to test.
 
-      Folded in: `Rust` is now a core package in `cmake/FPrime.cmake`
-      alongside `Fw` and `Os`. It was absent, so any project consuming F´ via
-      `find_package` never processed `Rust/CMakeLists.txt` and silently got
-      the C++ implementations whatever its `FPRIME_RUST_IMPL_*` settings said.
+      Folded in: a project consuming F´ via `find_package` now actually gets
+      the Rust implementations. It did not before — `Rust/enable.cmake`, which
+      sets `FPRIME_RS_AVAILABLE`, was included only from the framework's own
+      root `CMakeLists.txt`, so an external consumer built every C++ original
+      while still linking `libfprime_rust.a` as dead weight. Adding `Rust` to
+      `_FP_CORE_PACKAGES` was necessary but **not sufficient**, and shipping
+      only that would have left the bug in place looking fixed: the list is
+      walked in order and `Rust` sits last, long after `Fw`, `Svc`, `Os`,
+      `Drv`, `CFDP` and `Utils` have each read `FPRIME_RS_AVAILABLE` to choose
+      their sources. `cmake/FPrime.cmake` therefore includes `enable.cmake`
+      *ahead of* the loop; `include_guard(GLOBAL)` keeps that idempotent with
+      the root's own include. Verified by configuring a minimal external
+      `find_package` project: it now compiles `CircularBufferRust`,
+      `Crc32Rust`, `MaxHeapRust` and `FilePathUtilsRust`, and none of the C++
+      originals.
 
 - [~] **Phase 12 — partial: the two port shapes that matter most.** Counted
       across `Fw`, `Svc` and `Drv`, the framework's port definitions have 79
@@ -454,6 +482,11 @@ Phases 1–9 verifiable and Phase 10 not.
       primitives, bools, an enum parameter, a return value, a `ref`
       parameter, a `ref Fw::Buffer`, an event, a command answered `OK`, a
       command **rejected** with `VALIDATION_ERROR`, and a telemetry channel.
+
+      A command whose handlers were never installed now answers the dispatcher
+      with `EXECUTION_ERROR` rather than returning silently. A port call with
+      no handlers is a no-op, but a command is not: the dispatcher blocks
+      until it is answered, so a silent return would hang it.
 
       **Not done:** parameters (`paramGet`/`paramSet`) are not carried, and
       the target was the demo component rather than a real framework one,

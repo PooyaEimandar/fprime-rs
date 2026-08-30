@@ -9,11 +9,12 @@
 ####
 include_guard(GLOBAL)
 
-# Phase 1 scope: implementation selection applies to framework-tree builds
-# (this repository's root CMakeLists.txt, including TestDeploymentsProject,
-# which processes it). External projects consuming F Prime via find_package
-# do not process this file yet and silently keep the C++ implementations;
-# wiring selection into fprime_setup_included_code is Phase 2+ work.
+# Included from two places, and `include_guard(GLOBAL)` above makes that safe:
+# this repository's root CMakeLists.txt for framework-tree builds, and
+# cmake/FPrime.cmake ahead of the core-package loop so that projects consuming
+# F Prime via find_package get the same implementation selection. Both must
+# run before Fw/Svc/Os/Drv/CFDP/Utils, which read FPRIME_RS_AVAILABLE while
+# choosing their sources.
 
 option(FPRIME_ENABLE_RUST "Build the fprime-rs Rust components" ON)
 

@@ -8,11 +8,12 @@
 //! language-level dependency -- and it was enough to make "cargo-only"
 //! untestable.
 //!
-//! This binary removes that. It links `fprime-core`, `fprime-utils` and
-//! `fprime-svc` -- the crates carrying the serialization kernel, the
-//! CircularBuffer engine, CRC32, the CFDP checksum, the OSAL max heap, path
-//! resolution and the Svc logic -- and exercises each one, with the platform
-//! libc underneath and no C++ runtime.
+//! This binary removes that. It exercises `fprime-core` (the serialization
+//! kernel) and `fprime-utils` (CRC32, the CFDP checksum, the OSAL max heap
+//! and path resolution) with the platform libc underneath and no C++ runtime.
+//! `fprime-svc` is a declared dependency so that it too is built and linked
+//! by this binary, but its component logic needs a running component to
+//! exercise, so nothing here calls into it.
 //!
 //! It is emphatically **not** a deployment. There is no component runtime, no
 //! OSAL, no topology and no ground-system link; it does not prove Phase 10 is

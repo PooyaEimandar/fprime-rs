@@ -1214,8 +1214,15 @@ def c_type(desc):
 
 
 def c_param_decl(param):
-    """How a parameter appears in the C declaration and the shim's call."""
+    """How a parameter appears in the C declaration and the shim's call.
+
+    A buffer always crosses as a pointer, by-value or not: the shim marshals
+    the C++ object into a local triple and passes its address either way.
+    Only a `ref` buffer is mutable, and only it is written back.
+    """
     ty = c_type(param.desc)
+    if param.desc[0] == "buffer":
+        return f"{ty}* {param.name}" if param.by_ref else f"const {ty}* {param.name}"
     return f"{ty}* {param.name}" if param.by_ref else f"{ty} {param.name}"
 
 
@@ -1231,12 +1238,19 @@ def rust_param_type(desc):
 def rust_param_decl(param):
     """How a parameter appears in a trait method signature."""
     ty = rust_param_type(param.desc)
+    if param.desc[0] == "buffer":
+        # A by-value buffer is still borrowed: the payload belongs to the C++
+        # object for the call, and copying the triple would not copy the bytes.
+        return f"{param.name}: &mut {ty}" if param.by_ref else f"{param.name}: &{ty}"
     return f"{param.name}: &mut {ty}" if param.by_ref else f"{param.name}: {ty}"
 
 
 def rust_stub_decl(param):
     """How a parameter appears on the `extern "C"` stub."""
     ty = rust_param_type(param.desc)
+    if param.desc[0] == "buffer":
+        pointer = "*mut" if param.by_ref else "*const"
+        return f"{param.name}: {pointer} {ty}"
     return f"{param.name}: *mut {ty}" if param.by_ref else f"{param.name}: {ty}"
 
 
@@ -1453,18 +1467,22 @@ def generate_component_rust(
         call_args = "".join(f", {p.name}" for p in port.params)
         # `ref` parameters are bound before the call so the unsafe block can
         # carry its own SAFETY comment, which the workspace lints require.
+        borrowed = [p for p in port.params if p.by_ref or p.desc[0] == "buffer"]
         ref_binds = (
             [
-                "        // SAFETY: a `ref` parameter arrives as a pointer the",
-                "        // C++ side owns for the duration of this call.",
+                "        // SAFETY: these arrive as pointers the C++ side owns",
+                "        // for the duration of this call.",
             ]
-            if any(p.by_ref for p in port.params)
+            if borrowed
             else []
         )
         ref_binds += [
-            f"        let {p.name} = unsafe {{ &mut *{p.name} }};"
-            for p in port.params
-            if p.by_ref
+            (
+                f"        let {p.name} = unsafe {{ &mut *{p.name} }};"
+                if p.by_ref
+                else f"        let {p.name} = unsafe {{ &*{p.name} }};"
+            )
+            for p in borrowed
         ]
         env_param = ", env: *const Env" if has_env else ""
         env_arg = ", env" if has_env else ""
@@ -1518,18 +1536,22 @@ def generate_component_rust(
     for command in commands:
         c_args = "".join(f", {rust_stub_decl(p)}" for p in command.params)
         call_args = "".join(f", {p.name}" for p in command.params)
+        borrowed = [p for p in command.params if p.by_ref or p.desc[0] == "buffer"]
         cmd_binds = (
             [
-                "        // SAFETY: a `ref` parameter arrives as a pointer the",
-                "        // C++ side owns for the duration of this call.",
+                "        // SAFETY: these arrive as pointers the C++ side owns",
+                "        // for the duration of this call.",
             ]
-            if any(p.by_ref for p in command.params)
+            if borrowed
             else []
         )
         cmd_binds += [
-            f"        let {p.name} = unsafe {{ &mut *{p.name} }};"
-            for p in command.params
-            if p.by_ref
+            (
+                f"        let {p.name} = unsafe {{ &mut *{p.name} }};"
+                if p.by_ref
+                else f"        let {p.name} = unsafe {{ &*{p.name} }};"
+            )
+            for p in borrowed
         ]
         out += [
             f"/// Dispatch stub for the `{command.name}` command.",
@@ -1549,6 +1571,13 @@ def generate_component_rust(
             *cmd_binds,
             f"        handlers.cmd_{snake(command.name)}"
             f"(env, opcode, cmd_seq{call_args});",
+            "    } else {",
+            "        // A port call with no handlers installed is a no-op, but a",
+            "        // command is not: the dispatcher blocks until it is",
+            "        // answered, so an unanswered command hangs it. Fail the",
+            "        // command instead.",
+            "        // SAFETY: as above.",
+            "        unsafe { &*env }.respond(opcode, cmd_seq, cmd_response::EXECUTION_ERROR);",
             "    }",
             "}",
             "",
@@ -1882,6 +1911,22 @@ def generate_component_shim(
     return "\n".join(out)
 
 
+def clang_format_cpp(path):
+    """Format generated C++ in place, if clang-format can be found."""
+    candidates = [
+        Path(__file__).resolve().parents[2] / "fprime-venv" / "bin" / "clang-format",
+        Path(__file__).resolve().parents[2] / ".venv" / "bin" / "clang-format",
+    ]
+    exe = next((str(c) for c in candidates if c.exists()), None) or shutil.which(
+        "clang-format"
+    )
+    if exe is None:
+        print("fpp-to-rust: warning: clang-format not found; C++ left unformatted")
+        return
+    style = Path(__file__).resolve().parents[2] / ".clang-format"
+    subprocess.run([exe, f"--style=file:{style}", "-i", str(path)], check=True)
+
+
 def emit_component(ast, analysis, args):
     """Component mode: write the Rust glue, the C header, and the C++ shim."""
     if args.out_header is None or args.out_shim is None:
@@ -1952,6 +1997,12 @@ def emit_component(ast, analysis, args):
     for path, text in writes:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
+
+    # The generated C++ lands under Svc/, which the repository's format check
+    # covers, so it has to satisfy clang-format. Emitting it unformatted put
+    # the format check and the CI byte-diff of this generator's output in
+    # direct conflict -- the same trap gen_fw_kernel.py hit in Phase 8.
+    clang_format_cpp(args.out_shim)
 
     if shutil.which("rustfmt") is not None:
         subprocess.run(["rustfmt", "--edition", "2021", str(args.out)], check=True)

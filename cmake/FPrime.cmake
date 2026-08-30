@@ -211,12 +211,17 @@ function(fprime_setup_included_code)
     if (BUILD_TESTING)
         fprime_util_metadata_add_test(".*")
     endif()
-    # `Rust` is a core package like the rest: without it here, a project that
-    # consumes F Prime via find_package never processes Rust/CMakeLists.txt and
-    # silently gets the C++ implementations, whatever its FPRIME_RUST_IMPL_*
-    # settings say. Rust/enable.cmake is still included separately and earlier
-    # (see the root CMakeLists.txt), because Fw/Os/Svc read FPRIME_RS_AVAILABLE
-    # while selecting their sources -- long before this list is walked.
+    # fprime-rs: this must run BEFORE the packages below, not as one of them.
+    # Fw, Svc, Os, Drv, CFDP and Utils each read FPRIME_RS_AVAILABLE while
+    # choosing their sources, so the variable has to exist by the time the loop
+    # reaches them. Adding `Rust` to the list alone is not enough -- it sits
+    # last, long after those decisions are made, which left a find_package
+    # consumer building every C++ original while still linking libfprime_rust.a
+    # as dead weight. `include_guard(GLOBAL)` in enable.cmake makes this
+    # idempotent with the framework root's own include.
+    include("${FPRIME_FRAMEWORK_PATH}/Rust/enable.cmake")
+    # `Rust` is then a core package like the rest, so Rust_Codec and the
+    # cargo-driven staticlib are registered for find_package consumers too.
     set(_FP_CORE_PACKAGES Fpp default Fw Svc Os Drv CFDP Utils Rust)
     foreach (_FP_PACKAGE_DIR IN LISTS _FP_CORE_PACKAGES)
         set(FPRIME_CURRENT_MODULE "${_FP_PACKAGE_DIR}")

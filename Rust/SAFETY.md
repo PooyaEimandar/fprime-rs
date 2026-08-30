@@ -16,11 +16,16 @@ poorly:
 | `clippy::undocumented_unsafe_blocks` (deny) | Every `unsafe` block carries a `SAFETY:` comment. An unjustified block in this port is an unreviewed contract. |
 
 Already in force from earlier phases: `panic = "abort"` in both profiles,
-`#![no_std]` in every crate, exports declared `extern "C"` (never
-`"C-unwind"`), a `#[panic_handler]` routed into the `FW_ASSERT` fault path,
-status codes rather than `Result` across the boundary, caller-provided storage
-(the crates allocate nothing), and a const assertion that `usize` is at least
-as wide as `FwSizeType`.
+`#![no_std]` in every crate that ships into a deployment, exports declared
+`extern "C"` (never `"C-unwind"`), a `#[panic_handler]` routed into the
+`FW_ASSERT` fault path, status codes rather than `Result` across the boundary,
+caller-provided storage in the shipping crates (they allocate nothing), and a
+const assertion that `usize` is at least as wide as `FwSizeType`.
+
+The one exception is `fprime-selftest` (Phase 10), which is deliberately a
+`std` binary: its whole purpose is to be an executable that links no C++, so
+it prints and exits. It is not linked into any deployment and nothing depends
+on it.
 
 `fprime-ffi` sets `unsafe_op_in_unsafe_fn = "allow"`. Every function in that
 crate is an `unsafe extern "C"` boundary whose body *is* the unsafe operation,
@@ -146,8 +151,12 @@ shim asserts size, alignment and every field offset against the C++ `Node` at
 heap creation. A disagreement would corrupt a queue silently rather than
 fail, which is why it is checked rather than assumed.
 
-The pure-logic crates (`fprime-config`, `fprime-core`, and the rest of
-`fprime-utils`/`fprime-svc`) contain no unsafe code.
+`fprime-config` and `fprime-core` contain no unsafe code, and neither does
+the rest of `fprime-utils`. `fprime-svc` has one hand-written exception:
+`rust_demo.rs` calls `Buffer::as_slice`, which is `unsafe fn` because the
+payload is valid only for the duration of the port call. That is the shape
+every component handler taking an `Fw::Buffer` will have, so it is named here
+rather than left to look like an oversight.
 
 ### Borrow width at the FFI boundary
 

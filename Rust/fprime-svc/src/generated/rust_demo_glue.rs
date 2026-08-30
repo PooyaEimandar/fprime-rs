@@ -188,8 +188,8 @@ pub unsafe extern "C" fn fprime_rs_rustdemo_consumeIn(
         // SAFETY: the shim builds the Env on its own stack
         // and it outlives this call.
         let env = unsafe { &*env };
-        // SAFETY: a `ref` parameter arrives as a pointer the
-        // C++ side owns for the duration of this call.
+        // SAFETY: these arrive as pointers the C++ side owns
+        // for the duration of this call.
         let data = unsafe { &mut *data };
         handlers.consume_in(port_num, env, data);
     }
@@ -263,8 +263,8 @@ pub unsafe extern "C" fn fprime_rs_rustdemo_scaleIn(
         // SAFETY: the shim builds the Env on its own stack
         // and it outlives this call.
         let env = unsafe { &*env };
-        // SAFETY: a `ref` parameter arrives as a pointer the
-        // C++ side owns for the duration of this call.
+        // SAFETY: these arrive as pointers the C++ side owns
+        // for the duration of this call.
         let value = unsafe { &mut *value };
         handlers.scale_in(port_num, env, value);
     }
@@ -289,5 +289,12 @@ pub unsafe extern "C" fn fprime_rs_rustdemo_cmd_SET_TOTAL(
         // outlives this call.
         let env = unsafe { &*env };
         handlers.cmd_set_total(env, opcode, cmd_seq, value);
+    } else {
+        // A port call with no handlers installed is a no-op, but a
+        // command is not: the dispatcher blocks until it is
+        // answered, so an unanswered command hangs it. Fail the
+        // command instead.
+        // SAFETY: as above.
+        unsafe { &*env }.respond(opcode, cmd_seq, cmd_response::EXECUTION_ERROR);
     }
 }
