@@ -699,6 +699,90 @@ Phases 1–9 verifiable and Phase 10 not.
       two sittings; the phase is sized in weeks and that estimate still
       stands.
 
+      **The type generator was quietly dropping types.** Independent of the
+      candidate work, `tools/fprime-rs/fpp_to_rust.py` turned out to emit
+      nothing for any type defined inside a component body — it walked only
+      `DefModule` — while still reporting success. `Svc/PassiveRateGroup`
+      reported "0 arrays" for a model that defines one. Separately, array
+      sizes had to be integer literals, which refused essentially every array
+      F Prime actually defines: they are sized by named constants
+      (`ComQueueComPorts`, `PassiveRateGroupOutputPorts`) or enum constants
+      (`TelemetrySection.NUM_SECTIONS`). Both are fixed — sizes now come from
+      `analysis.valueMap`, which is FPP's own evaluation and therefore the
+      same number `fpp-to-cpp` emits, and component bodies are walked as
+      another scope, giving `Svc.PassiveRateGroup.CycleTime` the identity the
+      C++ autocoder gives `Svc::PassiveRateGroup_CycleTime`.
+
+      The more durable fix is the third one: `iter_definitions` now counts the
+      type definitions in the whole AST and refuses to return a smaller set
+      than it found. A scope kind nobody taught it to walk is now a loud
+      error naming the problem, rather than a file that looks complete. That
+      guard reproduces the original bug exactly when `DefComponent` is removed
+      from `SCOPE_KINDS`, which is how it is tested.
+
+      **Abstract types are the next wall, and half of it came down.** An
+      FPP `type Foo` with no body is declared in the model and implemented in
+      hand-written C++, so the model does not say how it serializes — and
+      almost every interesting framework model has one, which is why
+      `Svc/ComQueue`, `Svc/FprimeRouter` and `Svc/FrameAccumulator` all failed
+      with `unsupported type kind: AbsType`.
+
+      Some of them are not really opaque. `Fw::Time` holds a
+      `Fw::TimeValue m_val` and its `serializeTo` is `return
+      this->m_val.serializeTo(...)`, so on the wire a `Time` *is* a
+      `TimeValue` — an FPP struct the generator already emits. Those cases
+      need no hand-written Rust at all, only a recorded mapping, and
+      `ABSTRACT_AS_FPP_TYPE` now carries `Fw.Time` and `Fw.TimeInterval` with
+      the C++ evidence beside them. Resolution is lazy, because
+      `Fw/Types/Types.fpp` declares `type String` and `type PolyType` for
+      other models to refer to and a model that merely mentions one must still
+      generate.
+
+      `Fw::Buffer` needed the other kind of answer. It serializes by hand,
+      and one of its fields is a `PlatformPointerCastType` — declared in
+      `cmake/platform/<platform>/Platform/PlatformTypes.h` and **not in FPP at
+      all**. So `Fw::Buffer::SERIALIZED_SIZE` is not a fact any FPP-driven
+      generator can read out of the model; it is 36 bytes here only because
+      pointers are 64-bit here. Adding the alias to `PlatformTypes.fpp` would
+      not fix that, because one unix FPP file serves both 32- and 64-bit unix
+      while the C++ header picks between them with `#if`.
+
+      So it is mirrored by hand — `Rust/fprime-core/src/fw_buffer.rs` — and
+      the facts that mirror rests on are asserted back on the C++ side by
+      `Rust/RustAbstractTypeCheck.cpp`: that `PlatformPointerCastType` is
+      eight bytes, and that `Fw::Buffer::SERIALIZED_SIZE` is what the Rust
+      constant says. That second assertion is the load-bearing one, since it
+      holds whatever the individual field widths turn out to be. Changing the
+      Rust constant without the C++ agreeing fails the build, which is how it
+      was tested. The check compiles into `Fw_Buffer` rather than `Rust_Codec`
+      — `Rust_Codec` sits below `Fw_Types` in the link order, and depending
+      upward from there is a dependency cycle that Ninja catches immediately.
+
+      Two things about that mirror are worth saying plainly. **It holds an
+      address, not a buffer**: `Fw::Buffer` serializes its wrapped pointer, so
+      a serialized Buffer means something only inside the process that wrote
+      it. That is fine for what it is for — queue messages between components
+      in one address space — and `data` is deliberately a bare integer rather
+      than a pointer or slice so nothing is tempted to follow it. And **it is
+      64-bit only**: on a target where `PlatformPointerCastType` is four
+      bytes, the static_assert stops the build instead of letting a 4-byte
+      field be read as 8.
+
+      With that, `Svc/ComQueue`, `Svc/FprimeRouter` and `Svc/FrameAccumulator`
+      generate — 1,108, 475 and 429 lines of Rust, all of which compile, with
+      `SvcComDataContextPair::SERIALIZED_SIZE` reading
+      `FwBuffer::SERIALIZED_SIZE + ComCfgFrameContext::SERIALIZED_SIZE`,
+      structurally the same sum the C++ autocoder writes. An abstract type
+      with neither an FPP stand-in nor a mirror is still refused by name, and
+      the message says which of the two it would need.
+
+      `tools/fprime-rs/test_fpp_to_rust.py` is the generator's first test
+      suite — 13 cases over the resolution paths above, the omission guard,
+      abstract aliasing and refusal, and the flattened-name collision check.
+      CI passes `--require-tools` so a broken venv fails loudly instead of
+      skipping every case. Every checked-in generated artifact is
+      byte-identical after all of this, so it is purely additive.
+
 - [ ] **Phase 15 — The OSAL syscall layer** *(weeks)*. `Os::File`,
       `FileSystem`, `Directory`, `Task`, `Mutex`, `Queue`, `RawTime` in Rust
       behind the existing delegate interfaces. Mostly libc bindings: Rust

@@ -152,19 +152,110 @@ def opt(value):
     return value["Some"]
 
 
-def literal_int(node, what):
-    """Extract an integer literal, refusing anything else by name."""
-    data, _ = unwrap(node)
-    if not isinstance(data, dict) or "ExprLiteralInt" not in data:
-        kind = next(iter(data)) if isinstance(data, dict) else type(data).__name__
-        raise GeneratorError(
-            f"{what}: only integer literals are supported here, got {kind}"
-        )
-    return int(data["ExprLiteralInt"]["value"], 0)
+def resolve_int(value_map, node, what):
+    """The integer an expression node evaluates to.
+
+    Reads `analysis.valueMap`, which holds FPP's own evaluation of every
+    expression node -- the same number `fpp-to-cpp` emits. This matters more
+    than it sounds: almost no real array in the framework is sized by a
+    literal. They are sized by named constants (`ComQueueComPorts`,
+    `TelemetrySection.NUM_SECTIONS`, `PassiveRateGroupOutputPorts`), so
+    reading the literal out of the AST refuses essentially every array F Prime
+    actually defines.
+
+    The literal fallback is for nodes FPP did not put in the map.
+    """
+    data, node_id = unwrap(node)
+    entry = value_map.get(str(node_id))
+    if entry is not None:
+        kind = next(iter(entry))
+        if kind in ("Integer", "PrimitiveInt"):
+            return int(entry[kind]["value"])
+        if kind == "EnumConstant":
+            # `array X = [TelemetrySection.NUM_SECTIONS] ...` -- an enum
+            # constant is an integer here, and FPP records it as the
+            # (name, value) pair that fold_default also reads.
+            return int(entry[kind]["value"][1])
+        raise GeneratorError(f"{what}: FPP resolved this to a {kind}, not an integer")
+    if isinstance(data, dict) and "ExprLiteralInt" in data:
+        return int(data["ExprLiteralInt"]["value"], 0)
+    kind = next(iter(data)) if isinstance(data, dict) else type(data).__name__
+    raise GeneratorError(
+        f"{what}: FPP recorded no value for this expression and it is not an "
+        f"integer literal (got {kind})"
+    )
+
+
+# Abstract FPP types -- `type Foo` with no body -- are declared in the model and
+# implemented in hand-written C++, so the model does not describe how they
+# serialize. Some of them delegate that wholesale to an FPP struct, and for
+# those the mapping is exact and checkable against the C++: `Fw::Time` holds a
+# `Fw::TimeValue m_val` (Fw/Time/Time.hpp) and its serializeTo is `return
+# this->m_val.serializeTo(...)` (Fw/Time/Time.cpp), so on the wire a Time IS a
+# TimeValue.
+#
+# Only that shape belongs here. `Fw::Buffer`, for instance, does not qualify:
+# it serializes by hand and one of its fields is a `PlatformPointerCastType`,
+# which is declared in C++ (cmake/platform/unix/Platform/PlatformTypes.h) and
+# not in FPP at all -- so its serialized size is not a fact the model contains.
+# Anything unlisted is refused by name rather than guessed at.
+ABSTRACT_AS_FPP_TYPE = {
+    "Fw.Time": "Fw.TimeValue",
+    "Fw.TimeInterval": "Fw.TimeIntervalValue",
+}
+
+# Abstract types with no FPP stand-in, mirrored by hand in Rust instead:
+# qualified FPP name -> (Rust type, `use` path).
+#
+# Each of these rests on facts a person read out of the C++, so each needs a
+# static_assert on the C++ side to hold it -- Rust/RustAbstractTypeCheck.cpp,
+# compiled into Fw_Buffer. Do not add an entry without one.
+#
+# Fw::Buffer is here rather than above because it serializes by hand, and one
+# of its fields is a PlatformPointerCastType: declared in
+# cmake/platform/<platform>/Platform/PlatformTypes.h and not in FPP at all. Its
+# serialized size is therefore not a fact the model contains.
+ABSTRACT_AS_RUST_TYPE = {
+    "Fw.Buffer": ("FwBuffer", "fprime_core::fw_buffer::FwBuffer"),
+}
+
+# DefAbsType is collected but never emitted: it contributes a name that other
+# types refer to, and counting it keeps the completeness check below honest.
+DEFINITION_KINDS = ("DefStruct", "DefEnum", "DefArray", "DefAbsType")
+EMITTED_KINDS = ("DefStruct", "DefEnum", "DefArray")
+
+# Node kinds whose body may hold type definitions. A component is one of them:
+# `Svc/PassiveRateGroup/PassiveRateGroup.fpp` defines its `CycleTime` array
+# inside the component, which `fpp-to-cpp` emits as
+# `Svc::PassiveRateGroup_CycleTime`. Treating the component as another path
+# segment gives the same identity after flattening, and build_model's
+# collision check still protects it.
+SCOPE_KINDS = ("DefModule", "DefComponent")
+
+
+def count_definitions(node):
+    """How many type definitions the AST holds, wherever they are.
+
+    Paired with iter_definitions to make omission loud. The walker below only
+    descends into the scopes it knows, so a scope kind it has never seen would
+    otherwise drop every type inside it and still report success -- which is
+    exactly what happened before components were walked: the generator said
+    "0 arrays" for modules that define several.
+    """
+    total = 0
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in DEFINITION_KINDS:
+                total += 1
+            total += count_definitions(value)
+    elif isinstance(node, list):
+        for value in node:
+            total += count_definitions(value)
+    return total
 
 
 def iter_definitions(ast):
-    """Collect (module_path, kind, data, node_id) for every type definition."""
+    """Collect (scope_path, kind, data, node_id) for every type definition."""
     collected = []
 
     def walk(members, path):
@@ -173,15 +264,25 @@ def iter_definitions(ast):
             if not isinstance(node, dict):
                 continue
             for kind, wrapper in node.items():
-                if kind == "DefModule":
+                if kind in SCOPE_KINDS:
                     data, _ = unwrap(wrapper["node"])
                     walk(data["members"], path + [data["name"]])
-                elif kind in ("DefStruct", "DefEnum", "DefArray"):
+                elif kind in DEFINITION_KINDS:
                     data, node_id = unwrap(wrapper["node"])
                     collected.append((tuple(path), kind, data, node_id))
 
     for unit in ast:
         walk(unit["members"], [])
+
+    expected = count_definitions(ast)
+    if len(collected) != expected:
+        raise GeneratorError(
+            f"the model holds {expected} type definitions but only "
+            f"{len(collected)} are reachable from the scopes this generator "
+            f"walks ({', '.join(SCOPE_KINDS)}). Some type is nested in a scope "
+            f"kind that is not handled; emitting the rest would silently drop "
+            f"it. Add the scope kind to SCOPE_KINDS."
+        )
     return collected
 
 
@@ -190,11 +291,44 @@ def iter_definitions(ast):
 # ---------------------------------------------------------------------------
 
 
-def resolve_type(type_map, node_id):
+def resolve_type(model, type_map, node_id):
     entry = type_map.get(str(node_id))
     if entry is None:
         raise GeneratorError(f"no typeMap entry for AST node {node_id}")
+    if isinstance(entry, dict) and "AbsType" in entry:
+        return resolve_abstract(model, type_map, entry["AbsType"]["node"]["astNodeId"])
     return classify(entry)
+
+
+def resolve_abstract(model, type_map, decl_id):
+    """Resolve `type Foo` to whatever carries its serialization.
+
+    A model that merely declares an abstract type it never uses still
+    generates -- Fw/Types/Types.fpp declares `type String` and `type PolyType`
+    for the benefit of other models -- so this is reached only when a field
+    actually has that type.
+    """
+    target_id = model.abs_alias.get(decl_id) if model is not None else None
+    if target_id is not None:
+        return classify(type_map[str(target_id)])
+    qualified = (
+        model.abs_types.get(decl_id, f"AST node {decl_id}")
+        if model is not None
+        else f"AST node {decl_id}"
+    )
+    mirror = ABSTRACT_AS_RUST_TYPE.get(qualified)
+    if mirror is not None and model is not None:
+        rust, use_path = mirror
+        model.abs_imports.add(use_path)
+        return ("mirror", rust, None)
+    raise GeneratorError(
+        f"abstract type '{qualified}' has no Rust representation. It is "
+        f"declared in FPP and implemented in C++, so the model does not say "
+        f"how it serializes. If its C++ serializeTo delegates to an FPP type, "
+        f"add that mapping to ABSTRACT_AS_FPP_TYPE; otherwise it needs a "
+        f"hand-written Rust mirror, and its wire format must be pinned by a "
+        f"C++ test first"
+    )
 
 
 def classify(entry):
@@ -243,6 +377,9 @@ class Model:
         self.by_node_id = {}  # AST node id -> (path, name)
         self.enum_consts = {}  # AST node id -> {const name: value}
         self.value_map = {}  # AST node id -> FPP-evaluated value
+        self.abs_types = {}  # AST node id -> qualified name of a `type Foo`
+        self.abs_alias = {}  # abstract node id -> node id that carries its wire form
+        self.abs_imports = set()  # `use` paths for hand-written abstract mirrors
 
 
 def rust_name(path, name):
@@ -260,10 +397,17 @@ def build_model(ast, analysis, wanted_modules=None):
     # flattened-name collisions: module separators are erased, so `AB.C` and
     # `A.BC` would otherwise both become `ABC` and silently share a type.
     flattened = {}
+    by_qualified = {}
     for path, kind, data, node_id in defs:
         model.by_node_id[node_id] = (path, data["name"])
-        flat = rust_name(path, data["name"])
         qualified = ".".join(list(path) + [data["name"]])
+        by_qualified[qualified] = node_id
+        if kind == "DefAbsType":
+            # No Rust type of its own, so it takes part in neither the
+            # flattened-name check nor the emit loop.
+            model.abs_types[node_id] = qualified
+            continue
+        flat = rust_name(path, data["name"])
         if flat in flattened and flattened[flat] != qualified:
             raise GeneratorError(
                 f"flattened name collision: '{flattened[flat]}' and '{qualified}' "
@@ -272,6 +416,22 @@ def build_model(ast, analysis, wanted_modules=None):
         flattened[flat] = qualified
         if kind == "DefEnum":
             model.enum_consts[node_id] = collect_enum_constants(data, model.value_map)
+
+    # An abstract type stands in for the FPP type that carries its
+    # serialization. Resolved here so the target is a plain node id by the
+    # time anything asks about a field's type.
+    for node_id, qualified in model.abs_types.items():
+        target = ABSTRACT_AS_FPP_TYPE.get(qualified)
+        if target is None:
+            continue
+        target_id = by_qualified.get(target)
+        if target_id is None:
+            raise GeneratorError(
+                f"abstract type '{qualified}' is declared to serialize as "
+                f"'{target}', which is not in this model; add the file that "
+                f"defines it to the sources"
+            )
+        model.abs_alias[node_id] = target_id
 
     for path, kind, data, node_id in defs:
         if wanted_modules is not None and path and path[0] not in wanted_modules:
@@ -283,6 +443,10 @@ def build_model(ast, analysis, wanted_modules=None):
             model.enums.append(build_enum(model, type_map, path, data, node_id, where))
         elif kind == "DefArray":
             model.arrays.append(build_array(model, type_map, path, data, where))
+        elif kind == "DefAbsType":
+            pass  # registered above; nothing to emit
+        else:
+            raise GeneratorError(f"{where}: unhandled definition kind '{kind}'")
     return model
 
 
@@ -295,15 +459,9 @@ def collect_enum_constants(data, value_map):
         if value_node is None:
             value = implicit
         else:
-            _, vid = unwrap(value_node)
-            resolved = value_map.get(str(vid))
-            if resolved is not None and next(iter(resolved)) in (
-                "Integer",
-                "PrimitiveInt",
-            ):
-                value = int(resolved[next(iter(resolved))]["value"])
-            else:
-                value = literal_int(value_node, f"enum constant {const['name']}")
+            value = resolve_int(
+                value_map, value_node, f"enum constant {const['name']}"
+            )
         implicit = value + 1
         constants[const["name"]] = value
     return constants
@@ -315,7 +473,7 @@ def build_struct(model, type_map, path, data, where):
         member, _ = unwrap(entry[1])
         _, type_id = unwrap(member["typeName"])
         try:
-            desc = resolve_type(type_map, type_id)
+            desc = resolve_type(model, type_map, type_id)
         except GeneratorError as exc:
             raise GeneratorError(f"{where}.{member['name']}: {exc}") from exc
         if desc[0] == "string":
@@ -325,7 +483,11 @@ def build_struct(model, type_map, path, data, where):
             )
         size_node = opt(member["size"])
         count = (
-            literal_int(size_node, f"{where}.{member['name']} member array size")
+            resolve_int(
+                model.value_map,
+                size_node,
+                f"{where}.{member['name']} member array size",
+            )
             if size_node
             else None
         )
@@ -370,9 +532,9 @@ def build_enum(model, type_map, path, data, node_id, where):
 
 
 def build_array(model, type_map, path, data, where):
-    count = literal_int(data["size"], f"{where} array size")
+    count = resolve_int(model.value_map, data["size"], f"{where} array size")
     _, elt_id = unwrap(data["eltType"])
-    elt = resolve_type(type_map, elt_id)
+    elt = resolve_type(model, type_map, elt_id)
     if elt[0] == "string":
         raise GeneratorError(f"{where}: arrays of strings are not supported yet")
 
@@ -451,6 +613,8 @@ def zero_value(model, desc, count):
     elif desc[0] == "named":
         path, name = model.by_node_id[desc[1]]
         base = f"{rust_name(path, name)}::default()"
+    elif desc[0] == "mirror":
+        base = f"{desc[1]}::default()"
     else:
         raise GeneratorError(f"cannot default type kind: {desc[0]}")
     return f"[{base}; {count}]" if count else base
@@ -470,6 +634,8 @@ def field_rust_type(model, desc, count):
     elif kind == "named":
         path, name = model.by_node_id[desc[1]]
         base = rust_name(path, name)
+    elif kind == "mirror":
+        base = desc[1]
     else:
         raise GeneratorError(f"unsupported field type in codegen: {kind}")
     return f"[{base}; {count}]" if count else base
@@ -484,6 +650,8 @@ def size_term(model, desc, count):
     elif kind == "named":
         path, name = model.by_node_id[desc[1]]
         base = f"{rust_name(path, name)}::SERIALIZED_SIZE"
+    elif kind == "mirror":
+        base = f"{desc[1]}::SERIALIZED_SIZE"
     else:
         raise GeneratorError(f"cannot size type kind: {kind}")
     return f"{base} * {count}" if count else base
@@ -495,7 +663,7 @@ def emit_value_ser(desc, expr, indent):
         return f"{pad}buf.ser_{desc[1]}({expr}, mode)?;"
     if desc[0] == "bool":
         return f"{pad}buf.ser_bool({expr}, mode)?;"
-    if desc[0] == "named":
+    if desc[0] in ("named", "mirror"):
         return f"{pad}{expr}.serialize_to(buf, mode)?;"
     raise GeneratorError(f"unsupported serialize kind: {desc[0]}")
 
@@ -509,6 +677,8 @@ def emit_value_deser(model, desc, target, indent):
     if desc[0] == "named":
         path, name = model.by_node_id[desc[1]]
         return f"{pad}{target} = {rust_name(path, name)}::deserialize_from(buf, mode)?;"
+    if desc[0] == "mirror":
+        return f"{pad}{target} = {desc[1]}::deserialize_from(buf, mode)?;"
     raise GeneratorError(f"unsupported deserialize kind: {desc[0]}")
 
 
@@ -557,7 +727,7 @@ def emit_struct(model, path, name, fields, defaults, out):
         if count:
             out.append(f"        for item in self.{ident}.iter() {{")
             out.append(
-                emit_value_ser(desc, "*item" if desc[0] != "named" else "item", 12)
+                emit_value_ser(desc, "*item" if desc[0] not in ("named", "mirror") else "item", 12)
             )
             out.append("        }")
         else:
@@ -667,7 +837,7 @@ def emit_array(model, path, name, elt, count, default_elems, out):
         "    pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, mode: Endianness) -> SerResult {"
     )
     out.append("        for item in self.0.iter() {")
-    out.append(emit_value_ser(elt, "*item" if elt[0] != "named" else "item", 12))
+    out.append(emit_value_ser(elt, "*item" if elt[0] not in ("named", "mirror") else "item", 12))
     out.append("        }")
     out.append("        Ok(())")
     out.append("    }")
@@ -708,8 +878,12 @@ def generate(model, module_name):
         "",
         "use fprime_config::*;",
         "use fprime_core::{DeserReader, Endianness, SerBuffer, SerError, SerResult};",
-        "",
     ]
+    # Only when the model actually uses one: a file that uses none stays
+    # byte-identical to what it was before mirrors existed.
+    for use_path in sorted(model.abs_imports):
+        out.append(f"use {use_path};")
+    out.append("")
     for path, name, repr_rust, constants, default_value in model.enums:
         emit_enum(model, path, name, repr_rust, constants, default_value, out)
     for path, name, elt, count, default_elems in model.arrays:
@@ -1124,7 +1298,10 @@ def described_type(type_map, type_id, type_name_node, where):
         # no stable ABI -- but it is really (data, size, context), and those
         # three cross fine as a repr(C) triple.
         return ("buffer", None, None, cpp)
-    desc = resolve_type(type_map, type_id)
+    # None: the component/FFI path carries values across extern "C" rather
+    # than serializing them, so an abstract type's wire form is not what it
+    # would need even if one were known.
+    desc = resolve_type(None, type_map, type_id)
     if desc[0] in ("prim", "bool"):
         return desc
     entry = type_map.get(str(type_id))

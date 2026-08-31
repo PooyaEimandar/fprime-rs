@@ -193,6 +193,15 @@ jobs:
           python3 -m venv fprime-venv
           . fprime-venv/bin/activate
           pip install -q -r requirements.txt
+      - name: The type generator's own tests
+        # fpp_to_rust.py is ~2,500 lines that everything downstream of Phase 4
+        # rests on. These pin the cases that were actually wrong -- array sizes
+        # given as named constants, and types defined inside a component body,
+        # which the generator used to drop while reporting success. It lives in
+        # this job because it needs fpp-to-json, which only the fprime venv has.
+        run: |
+          . fprime-venv/bin/activate
+          python3 tools/fprime-rs/test_fpp_to_rust.py --require-tools
       - name: Generate the Ref build cache
         working-directory: TestDeploymentsProject
         run: |
