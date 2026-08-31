@@ -77,8 +77,22 @@ function(add_fprime_supplied_os_module NAMES SUFFIX)
     set(SOURCE_INPUTS)
     set(HEADERS_INPUTS)
     # Add files for each name supplied
+    #
+    # fprime-rs: setting FPRIME_OS_SOURCE_<Name> before this call substitutes a
+    # different .cpp for that one interface. It exists because this helper
+    # derives its sources from the module names, so there is no SOURCES list to
+    # swap the way Fw/Time and Os/FilePathUtils do. The override must still
+    # implement the same class -- the header, the module name and the delegate
+    # are unchanged -- and it is checked for existence like any other source.
     foreach (NAME IN LISTS NAMES)
-        list(APPEND SOURCE_INPUTS "${CMAKE_CURRENT_LIST_DIR}/${NAME}.cpp")
+        if (DEFINED FPRIME_OS_SOURCE_${NAME})
+            if (NOT EXISTS "${FPRIME_OS_SOURCE_${NAME}}")
+                message(FATAL_ERROR "FPRIME_OS_SOURCE_${NAME} is set to ${FPRIME_OS_SOURCE_${NAME}}, which does not exist.")
+            endif()
+            list(APPEND SOURCE_INPUTS "${FPRIME_OS_SOURCE_${NAME}}")
+        else()
+            list(APPEND SOURCE_INPUTS "${CMAKE_CURRENT_LIST_DIR}/${NAME}.cpp")
+        endif()
         list(APPEND HEADERS_INPUTS "${CMAKE_CURRENT_LIST_DIR}/${NAME}.hpp")
     endforeach ()
     # Set up module

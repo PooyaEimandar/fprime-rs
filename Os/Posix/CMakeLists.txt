@@ -41,7 +41,43 @@ register_os_implementation("Mutex;ConditionVariable" Posix Os_Posix_Shared)
 if(NOT APPLE)
     register_os_implementation("CountingSemaphore" Posix Os_Posix_Shared)
 endif()
+# fprime-rs Phase 15: the interval arithmetic behind Os::RawTime can run in
+# Rust (see Rust/enable.cmake). RawTimeRust.cpp is generated from RawTime.cpp
+# by tools/fprime-rs/gen_os_rawtime.py; the clock, errno translation, handle
+# and serialization stay in the original.
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_OS_RAWTIME)
+    set(FPRIME_OS_SOURCE_RawTime "${CMAKE_CURRENT_LIST_DIR}/RawTimeRust.cpp")
+
+    # The shim IS the implementation of RawTime.cpp, so it must fault as
+    # RawTime.cpp. Recompute ASSERT_FILE_ID and ASSERT_RELATIVE_PATH from the
+    # original's path, as Fw/Time and Fw/Types do.
+    string(REPLACE "${FPRIME_FRAMEWORK_PATH}/" "" FPRIME_RAWTIME_SHORT_SRC
+           "${CMAKE_CURRENT_LIST_DIR}/RawTime.cpp")
+    string(MD5 FPRIME_RAWTIME_HASH "${FPRIME_RAWTIME_SHORT_SRC}")
+    string(SUBSTRING "${FPRIME_RAWTIME_HASH}" 0 8 FPRIME_RAWTIME_FILE_ID)
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/RawTimeRust.cpp" PROPERTIES
+        COMPILE_FLAGS
+        "-DASSERT_FILE_ID=0x${FPRIME_RAWTIME_FILE_ID} -DASSERT_RELATIVE_PATH='\"${FPRIME_RAWTIME_SHORT_SRC}\"'")
+endif()
 register_os_implementation("RawTime" Posix Os_Posix_Shared)
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_OS_RAWTIME AND NOT FPRIME_IS_SUB_BUILD)
+    target_link_libraries(Os_RawTime_Posix_Implementation PUBLIC fprime_rust)
+
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/RawTimeRust.verified"
+        COMMAND "${PYTHON}" "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_os_rawtime.py" "--check"
+        COMMAND "${CMAKE_COMMAND}" "-E" "touch" "${CMAKE_CURRENT_BINARY_DIR}/RawTimeRust.verified"
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/RawTime.cpp"
+                "${CMAKE_CURRENT_LIST_DIR}/RawTimeRust.cpp"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_os_rawtime.py"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/shimgen.py"
+        COMMENT "[rust] Verifying the Rust-backed Os::RawTime matches RawTime.cpp"
+        VERBATIM
+    )
+    add_custom_target(Os_RawTime_rust_verify
+                      DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/RawTimeRust.verified")
+    add_dependencies(Os_RawTime_Posix_Implementation Os_RawTime_rust_verify)
+endif()
 
 # -----------------------------------------
 ### Os/File/Posix Test Section

@@ -30,6 +30,7 @@ import gen_fw_strings
 import gen_fw_time
 import gen_os_filepath
 import gen_os_maxheap
+import gen_os_rawtime
 
 # (shim, [(description, which file, find, replace, expected_up_to_date)])
 #
@@ -116,6 +117,34 @@ CASES = [
                 "source",
                 "#include <Fw/Types/ExternalString.hpp>",
                 "#include <Fw/Types/StringBase.hpp>",
+                False,
+            ),
+        ],
+    ),
+    (
+        gen_os_rawtime.SHIM,
+        [
+            (
+                "upstream edit inside the replaced body: the borrow condition",
+                "source",
+                "if (t1.tv_nsec < t2.tv_nsec) {",
+                "if (t1.tv_nsec <= t2.tv_nsec) {",
+                False,
+            ),
+            (
+                "upstream edit inside the replaced body: the operand swap",
+                "source",
+                "if ((t1.tv_sec < t2.tv_sec) or (t1.tv_sec == t2.tv_sec and t1.tv_nsec < t2.tv_nsec)) {",
+                "if ((t1.tv_sec < t2.tv_sec) or (t1.tv_sec == t2.tv_sec and t1.tv_nsec > t2.tv_nsec)) {",
+                False,
+            ),
+            (
+                # The clock deliberately stays in C++, so an edit to it is
+                # exactly the kind of upstream change the shim must notice.
+                "upstream edit outside every replaced body: the clock",
+                "source",
+                "clock_gettime(CLOCK_REALTIME",
+                "clock_gettime(CLOCK_MONOTONIC",
                 False,
             ),
         ],

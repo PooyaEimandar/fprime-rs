@@ -178,6 +178,11 @@ Fw::ExternalSerializeBufferWithMemberCopy Buffer::getDeserializer() {
     }
 }
 
+// The field order below is mirrored by hand in Rust/fprime-core/src/fw_buffer.rs
+// -- Fw::Buffer is an FPP abstract type, so nothing generates it. It is also
+// NOT this class's declaration order. Reordering these calls means editing
+// that file too; tools/fprime-rs/check_fw_buffer_wire.py compares the two and
+// fails if they drift.
 Fw::SerializeStatus Buffer::serializeTo(Fw::SerialBufferBase& buffer, Fw::Endianness mode) const {
     Fw::SerializeStatus stat;
     stat = buffer.serializeFrom(reinterpret_cast<PlatformPointerCastType>(this->m_bufferData), mode);

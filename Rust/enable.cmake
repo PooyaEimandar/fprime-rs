@@ -62,6 +62,11 @@ option(FPRIME_RUST_IMPL_FW_TIME "Use the Rust Fw::Time arithmetic" ON)
 # tax the Fw kernel above imposes, so this defaults ON.
 option(FPRIME_RUST_IMPL_FW_STRINGS "Use the Rust Fw::StringUtils primitives" ON)
 
+# Phase 15, the first OSAL slice: the interval arithmetic behind Os::RawTime.
+# Not the clock -- clock_gettime and its errno read stay together in C++,
+# because errno is thread-local and the next failing call overwrites it.
+option(FPRIME_RUST_IMPL_OS_RAWTIME "Use the Rust Os::RawTime interval arithmetic" ON)
+
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH
 # (the fprime venv provides it). Must be registered before module detection.

@@ -8,6 +8,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod fw_buffer;
+pub mod raw_time;
 pub mod strings;
 pub mod time;
 

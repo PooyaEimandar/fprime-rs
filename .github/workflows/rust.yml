@@ -10,9 +10,16 @@ on:
       # must re-run its --check, or the Rust-backed copy diverges silently
       - "Fw/Types/**"
       - "Fw/Time/**"
+      # Phase 14 put C++ facts under these three that Rust now rests on:
+      # Fw::Buffer's wire order is mirrored by hand, and Fw/Com + Fw/Tlm carry
+      # tests written to pin behaviour the port depends on.
+      - "Fw/Buffer/**"
+      - "Fw/Com/**"
+      - "Fw/Tlm/**"
       - "Os/FilePathUtils*"
       - "Os/SandboxedFile.cpp"
       - "Os/Generic/**"
+      - "Os/Posix/**"
       - "Os/CMakeLists.txt"
       - "cmake/FPrime.cmake"
       - "TestDeploymentsProject/Ref/Top/**"
@@ -42,9 +49,16 @@ on:
       # must re-run its --check, or the Rust-backed copy diverges silently
       - "Fw/Types/**"
       - "Fw/Time/**"
+      # Phase 14 put C++ facts under these three that Rust now rests on:
+      # Fw::Buffer's wire order is mirrored by hand, and Fw/Com + Fw/Tlm carry
+      # tests written to pin behaviour the port depends on.
+      - "Fw/Buffer/**"
+      - "Fw/Com/**"
+      - "Fw/Tlm/**"
       - "Os/FilePathUtils*"
       - "Os/SandboxedFile.cpp"
       - "Os/Generic/**"
+      - "Os/Posix/**"
       - "Os/CMakeLists.txt"
       - "cmake/FPrime.cmake"
       - "TestDeploymentsProject/Ref/Top/**"
@@ -162,6 +176,17 @@ jobs:
           python3 tools/fprime-rs/gen_os_filepath.py --check
           python3 tools/fprime-rs/gen_fw_time.py --check
           python3 tools/fprime-rs/gen_fw_strings.py --check
+          python3 tools/fprime-rs/gen_os_rawtime.py --check
+      - name: Fw::Buffer's wire order still matches its Rust mirror
+        # Fw::Buffer is an FPP abstract type: nothing generates it, so
+        # Rust/fprime-core/src/fw_buffer.rs mirrors the C++ by hand. The size
+        # assertion in RustAbstractTypeCheck.cpp and both round-trip tests are
+        # invariant under a same-width field swap -- this is the only check
+        # that compares the two orders against each other.
+        working-directory: .
+        run: |
+          python3 tools/fprime-rs/check_fw_buffer_wire.py
+          python3 tools/fprime-rs/check_fw_buffer_wire.py --self-test
       - name: The drift check itself still catches drift
         # Every --check above runs against a pristine tree, so it only ever
         # exercises the pass path. This mutates copies and asserts that real
@@ -309,7 +334,7 @@ jobs:
           . fprime-venv/bin/activate
           CACHE="$PWD/build-rust-off"
           fprime-util generate --ut --build-cache "$CACHE" -DFPRIME_ENABLE_RUST=OFF
-          for dir in Fw/Types Fw/Time Os Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
+          for dir in Fw/Types Fw/Time Fw/Buffer Fw/Com Fw/Tlm Os Os/Posix Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
                      Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator \
                      Svc/FprimeRouter Svc/ComQueue; do
             (cd "$dir" && fprime-util build --ut --build-cache "$CACHE" -j4)
@@ -317,6 +342,6 @@ jobs:
       - name: Check Rust-backed modules
         run: |
           . fprime-venv/bin/activate
-          for dir in Rust Fw/Types Fw/Time Os Os/Generic Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
+          for dir in Rust Fw/Types Fw/Time Fw/Buffer Fw/Com Fw/Tlm Os Os/Posix Os/Generic Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator Svc/FprimeRouter Svc/ComQueue Svc/RustDemo; do
             (cd "$dir" && fprime-util check -j4)
           done

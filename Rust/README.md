@@ -494,7 +494,15 @@ Phases 1–9 verifiable and Phase 10 not.
       criterion — "one real in-tree component with a command and a channel
       runs its logic in Rust, its own suite green" — is **not** met.
 
-- [~] **Phase 14 — partial: `Fw::Time`'s arithmetic and `Fw::StringUtils`.** Every timestamp the
+- [x] **Phase 14 — closed as superseded, not achieved.** Read the verdict at
+      the end of this entry before the narrative: none of the four types this
+      phase named were ported, because the phase's premise stopped being true
+      once Phase 8 landed. What it produced instead is a general result about
+      what is worth porting, two smaller pieces that were worth it, four
+      upstream C++ defect fixes, three new test suites, and a type generator
+      that no longer silently drops types.
+
+      Every timestamp the
       framework stamps on an event, a telemetry sample or a data product is
       ordered and offset by this code, and all of it is carry/borrow
       arithmetic on a (seconds, microseconds) pair. Comparison, addition,
@@ -688,16 +696,44 @@ Phases 1–9 verifiable and Phase 10 not.
         the wire without relating them, so that state is reachable. It stays,
         with a comment saying what it is actually for.
 
-      **What this is not.** The phase's goal — `Fw::Buffer`, the string types,
-      `PolyType`, and the Com/Cmd/Tlm/Log packet types as canonical Rust — is
-      still early. `Fw::Time` (273 lines) and `Fw::StringUtils` (137) are 410
-      of the roughly 15,890 that goal covers, and in both cases only the
-      arithmetic moved. `Fw::Buffer` (250 lines), `PolyType` (654),
-      `StringBase` (139) and the four packet types (344) are untouched, and
-      the ~53,015-line Enum/Serializable/Array/Constants tier that Phase 4
-      showed is mechanical has not been generated for real types. These were
-      two sittings; the phase is sized in weeks and that estimate still
-      stands.
+      **Verdict: closed as superseded.** The phase's goal — `Fw::Buffer`,
+      `StringBase`, `PolyType` and the Com/Cmd/Tlm/Log packet types as
+      canonical Rust — was not met, and should not be. `Fw::Time` (273 lines)
+      and `Fw::StringUtils` (137) are 410 lines of the ~15,890 the goal named,
+      and in both cases only the arithmetic moved.
+
+      The general result, which is what makes this a phase-ending answer
+      rather than an excuse: **a descriptor or delegation class sitting on top
+      of a Rust-backed serialization kernel is not a porting candidate.**
+      `Buffer.cpp`, `StringBase.cpp`, `TlmPacket.cpp` and `ComPacket.cpp` are
+      field assignment plus virtual calls on `Fw::SerialBufferBase`, and
+      `Fw/Types/SerializableRust.cpp` already routes every one of those
+      primitives into Rust from underneath. Porting the layer above either
+      re-enters that kernel through a second boundary — which Phase 8's own
+      measurement makes strictly worse — or writes bytes directly and
+      duplicates the kernel's cursor and status bookkeeping. That argument is
+      from the code, and it generalises to any future candidate of the same
+      shape.
+
+      Two honest qualifications on it. **`PolyType` is not that shape** and
+      needs its own reason: it is a tagged union whose comparison operators
+      are ~120 lines of type dispatch that Phase 8 backs not at all. It is
+      still declined, but because dispatch is not computation and a C union is
+      a poor `repr(C)` payload — not because it is already Rust underneath.
+      And the premise is **conditional on a switch that is OFF by default**:
+      `FPRIME_RUST_IMPL_FW_TYPES` (Rust/enable.cmake) defaults off, for a
+      measured +40–80% per multi-field serialize, so in a stock build nothing
+      beneath these four is Rust at all. That does not rescue them — it argues
+      the kernel boundary should be paid once, not twice.
+
+      **What carries forward.** The ~53,015-line
+      Enum/Serializable/Array/Constants tier is the one part of the original
+      framing that is neither obsolete nor done, and it is now unblocked: the
+      generator handles component-nested scopes, `valueMap` sizes and abstract
+      types, and `Svc/ComQueue`, `Svc/FprimeRouter` and `Svc/FrameAccumulator`
+      generate and compile. Generating it for real types belongs with Phase 17,
+      which is where the component bases are generated, and is recorded there
+      rather than left dangling here.
 
       **The type generator was quietly dropping types.** Independent of the
       candidate work, `tools/fprime-rs/fpp_to_rust.py` turned out to emit
@@ -783,14 +819,85 @@ Phases 1–9 verifiable and Phase 10 not.
       skipping every case. Every checked-in generated artifact is
       byte-identical after all of this, so it is purely additive.
 
-- [ ] **Phase 15 — The OSAL syscall layer** *(weeks)*. `Os::File`,
-      `FileSystem`, `Directory`, `Task`, `Mutex`, `Queue`, `RawTime` in Rust
-      behind the existing delegate interfaces. Mostly libc bindings: Rust
-      `std` is usable only on hosted targets and drops flight-critical
-      properties there — priority inheritance, scheduling policy, CPU
-      affinity, `CLOCK_MONOTONIC` selection — so expect raw `pthread`.
-      **Exit:** a deployment runs with the Rust OSAL selected. **Oracle:** the
-      `Os` suites, which are already implementation-independent.
+- [~] **Phase 15 — started: `Os::RawTime`'s interval arithmetic.** *(weeks
+      remaining)*. The goal is `Os::File`, `FileSystem`, `Directory`, `Task`,
+      `Mutex`, `Queue` and `RawTime` in Rust behind the existing delegate
+      interfaces. **Exit:** a deployment runs with the Rust OSAL selected.
+      **Oracle:** the `Os` suites, which are already
+      implementation-independent.
+
+      **What landed: about 45 lines, and they are the arithmetic ones.**
+      `PosixRawTime::getTimeInterval` — the operand ordering, the borrow across
+      the second boundary, and the nanosecond truncation — now runs in
+      `Rust/fprime-core/src/raw_time.rs`, selected by
+      `FPRIME_RUST_IMPL_OS_RAWTIME` (default ON), with
+      `Os/Posix/RawTimeRust.cpp` generated by
+      `tools/fprime-rs/gen_os_rawtime.py`. `PosixRawTimeTest` passes in both
+      switch positions, including its 5,000-step randomized scenario against a
+      `std::chrono` shadow model — an oracle that covers exactly the lines that
+      moved, which is why this was chosen over candidates with three times the
+      decision logic.
+
+      **The clock deliberately did not move, and that is the design.**
+      `now()` is a `clock_gettime` whose failure is read out of `errno`, and
+      `errno` is thread-local and overwritten by the next failing call — so a
+      syscall and the errno read that interprets it cannot be split across a
+      language boundary. `getTimeInterval` is the one function in the file
+      that touches no syscall at all. `getDiffUsec` is not here either, for a
+      different reason: its body is two overflow guards and an addition, and
+      this port's rule is that guards stay in C++, so moving it would relocate
+      an `a + b` and leave the interesting part behind.
+
+      **A finding, recorded rather than fixed.** The subtraction is only safe
+      for a *normalized* `timespec`. `PosixRawTime::deserializeFrom`
+      (`Os/Posix/RawTime.cpp`) writes `{sec, nsec}` straight off the wire with
+      no check, so `tv_nsec >= 1e9` is reachable — and then the microseconds
+      the interval yields can exceed `Fw::TimeInterval::set`'s
+      `useconds < 1000000` precondition, which `FW_ASSERT`s
+      (`Fw/Time/TimeInterval.cpp:19`). A corrupt telemetry field faults. The
+      Rust mirrors the C++ exactly, including this, and a unit test pins it so
+      the behaviour cannot change silently; normalizing on deserialize is a
+      behaviour change to flight software and belongs in its own decision.
+      Deliberately *not* pinned with a C++ death test: `Os/test/ut/rawtime` has
+      none today, and adding one would introduce the assert-file-name coupling
+      that made this the safest candidate in the first place.
+
+      **A new hook, because the OSAL is built differently.** Unlike `Fw`,
+      `Os` implementations are selected by `register_os_implementation`, which
+      derives its sources from module names — there is no `SOURCES` list to
+      swap the way `Fw/Time` has. `Os/CMakeLists.txt`'s helper now honours
+      `FPRIME_OS_SOURCE_<Name>`, checked for existence like any other source.
+      That hook is what any later Phase 15 slice will use.
+
+      **What this is not: roughly 0.6% of the phase.** Around 45 lines moved
+      out of ~7,500 in the `Os` tree. `File`, `FileSystem`, `Directory`,
+      `Task`, `Mutex`, `Condition`, `Queue`, `Console`, `CountingSemaphore`,
+      `Cpu` and `Memory` are all untouched. **No syscall moved**, no `libc`
+      dependency was added, no thread was created — so every hazard the phase
+      exists to retire (priority inheritance, scheduling policy, CPU affinity,
+      `CLOCK_MONOTONIC` selection, `EINTR` retry, blocking calls held across an
+      FFI frame) is untouched and unlearned. This is Phase 14's shape applied
+      to `Os`: flatten to integers, cross, do arithmetic, read back.
+
+      It also does not answer the question that decides the phase. A survey of
+      all seven subsystems measured the delegate handles: `PosixRawTime` is 24
+      bytes against `FW_RAW_TIME_HANDLE_MAX_SIZE = 56`, and it is the *only*
+      candidate with headroom. `File`, `Directory` and `FileSystem` are 16/16;
+      `Mutex` 72/72; `Condition` 56/56; `Task` 40/40 — every one of them sits
+      exactly on `Os/Delegate.hpp`'s `static_assert`. RawTime is the easy case
+      precisely because Rust stores nothing and never needed the spare bytes.
+      Whether a Rust-backed delegate can own state inside a handle with zero
+      headroom — the situation in six of seven — is unanswered, and answering
+      it means `FW_*_HANDLE_MAX_SIZE` changes that ripple into every downstream
+      deployment's `PlatformCfg`.
+
+      **The next slice is a test-writing job, not a porting one.** `Os::File`
+      has the most movable logic in the OSAL (~131 syscall-free lines), but
+      `readline` (48 of them) and `seek_absolute` have *zero* coverage — the
+      good half and the tested half do not overlap. Writing those tests against
+      the `SyntheticFile` shadow that already models everything they need makes
+      `File` the better candidate on every axis; porting it first would be
+      porting into the dark.
 
 - [ ] **Phase 16 — The component runtime** *(months — this is the project)*.
       A Rust-native equivalent of `ActiveComponentBase`/`QueuedComponentBase`:

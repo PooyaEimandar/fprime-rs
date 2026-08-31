@@ -2178,3 +2178,49 @@ mod tests {
         assert!(accepted, "equal times subtract to zero");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Os::RawTime arithmetic (Phase 15)
+// ---------------------------------------------------------------------------
+//
+// The first Os arithmetic to move. Deliberately not the clock: `now()` is a
+// clock_gettime call whose failure is read from errno, and errno is
+// thread-local and clobbered by the next failing call, so the syscall and its
+// errno read must stay together in C++. Four integers cross; no operating
+// system does.
+
+use fprime_core::raw_time::{self, Instant};
+
+/// `PosixRawTime::getTimeInterval`, as (seconds, microseconds).
+///
+/// Takes the two `timespec` fields of each instant rather than a struct: a
+/// `timespec`'s layout is the platform's, not ours, and there is nothing to
+/// gain by mirroring it when the whole payload is four integers.
+///
+/// # Safety
+/// Both out-parameters must point to writable `u32`s.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rawtime_interval(
+    a_seconds: i64,
+    a_nanoseconds: i64,
+    b_seconds: i64,
+    b_nanoseconds: i64,
+    out_seconds: *mut u32,
+    out_useconds: *mut u32,
+) {
+    let (seconds, useconds) = raw_time::interval(
+        Instant {
+            seconds: a_seconds,
+            nanoseconds: a_nanoseconds,
+        },
+        Instant {
+            seconds: b_seconds,
+            nanoseconds: b_nanoseconds,
+        },
+    );
+    // SAFETY: the caller guarantees both pointers are writable.
+    unsafe {
+        *out_seconds = seconds;
+        *out_useconds = useconds;
+    }
+}
