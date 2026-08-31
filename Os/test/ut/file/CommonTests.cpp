@@ -4,6 +4,8 @@
 // ======================================================================
 #include "Os/test/ut/file/CommonTests.hpp"
 #include <gtest/gtest.h>
+#include <cstring>
+#include <vector>
 #include "Os/File.hpp"
 
 static const U32 RANDOM_BOUND = 1000;
@@ -578,5 +580,184 @@ TEST_F(FunctionalIO, CrcHardcodedValue_Incremental) {
     // Same expected value as full CRC
     ASSERT_EQ(crc, static_cast<U32>(0x340BC6D9)) << "Incremental CRC of \"123456789\" must equal 0x340BC6D9";
 
+    tester->m_file.close();
+}
+
+// ======================================================================
+// readline and seek_absolute
+//
+// Both had no coverage at all. readline is 48 lines of parsing logic in
+// Os/File.cpp -- a chunked read loop, a newline scan, and a contract about
+// where the file is left on each exit path -- and its only caller in the tree
+// is Os/Linux/Cpu.cpp. seek_absolute has no caller outside Os/File.cpp and is
+// reachable from the suite only through readline.
+//
+// These are written against the interface, so they run for any implementation
+// that supports functional i/o. They pin the behaviour that exists rather than
+// the behaviour one might expect: where the two differ, the comment says so.
+// ======================================================================
+
+//! Create the test file, fill it with `content`, and reopen it for reading.
+static void write_then_reopen_for_read(Os::Test::FileTest::Tester& tester,
+                                       const U8* content,
+                                       FwSizeType length) {
+    Os::Test::FileTest::Tester::OpenFileCreate open_rule(false);
+    open_rule.apply(tester);
+
+    FwSizeType written = length;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester.m_file.write(content, written));
+    ASSERT_EQ(written, length);
+
+    tester.m_file.close();
+    ASSERT_EQ(Os::File::Status::OP_OK,
+              tester.m_file.open(tester.m_current_path.c_str(), Os::File::OPEN_READ));
+}
+
+static void write_then_reopen_for_read(Os::Test::FileTest::Tester& tester, const char* content) {
+    write_then_reopen_for_read(tester, reinterpret_cast<const U8*>(content),
+                               static_cast<FwSizeType>(::strlen(content)));
+}
+
+// A line is returned up to and including its newline, and the file is left
+// positioned just after it -- so consecutive calls walk the file.
+TEST_F(FunctionalIO, ReadlineReturnsLinesInOrder) {
+    write_then_reopen_for_read(*tester, "ab\ncde\n");
+
+    U8 buffer[32];
+    FwSizeType size = sizeof(buffer);
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(3));
+    ASSERT_EQ(0, ::memcmp(buffer, "ab\n", 3));
+
+    FwSizeType position = 0;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
+    ASSERT_EQ(position, static_cast<FwSizeType>(3)) << "left just past the newline";
+
+    size = sizeof(buffer);
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(4));
+    ASSERT_EQ(0, ::memcmp(buffer, "cde\n", 4));
+    tester->m_file.close();
+}
+
+// A newline in the first byte yields a one-byte line, not an empty one.
+TEST_F(FunctionalIO, ReadlineOnALeadingNewlineReturnsOneByte) {
+    write_then_reopen_for_read(*tester, "\nrest\n");
+
+    U8 buffer[32];
+    FwSizeType size = sizeof(buffer);
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(1));
+    ASSERT_EQ(buffer[0], static_cast<U8>('\n'));
+    tester->m_file.close();
+}
+
+// Running out of file before finding a newline is OP_OK with however much was
+// read -- NOT an error, and NOT a restored position. This is the one exit path
+// in readline that does not seek back, which is worth pinning precisely
+// because it is the asymmetric one.
+TEST_F(FunctionalIO, ReadlineAtEndOfFileReturnsWhatItRead) {
+    write_then_reopen_for_read(*tester, "tail");
+
+    U8 buffer[32];
+    FwSizeType size = sizeof(buffer);
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(4)) << "an unterminated final line is still returned";
+    ASSERT_EQ(0, ::memcmp(buffer, "tail", 4));
+
+    FwSizeType position = 0;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
+    ASSERT_EQ(position, static_cast<FwSizeType>(4))
+        << "the end-of-file path does not restore the original position";
+    tester->m_file.close();
+}
+
+// No newline within the bytes the caller allowed: OTHER_ERROR, size zeroed,
+// and the position put back where it started so the caller can retry larger.
+TEST_F(FunctionalIO, ReadlineWithNoNewlineInRangeRestoresThePosition) {
+    write_then_reopen_for_read(*tester, "abcdefgh\n");
+
+    U8 buffer[4];
+    FwSizeType size = 3;  // "abc" -- no newline inside the allowance
+    ASSERT_EQ(Os::File::Status::OTHER_ERROR, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(0)) << "size is zeroed on the error path";
+
+    FwSizeType position = 0;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
+    ASSERT_EQ(position, static_cast<FwSizeType>(0)) << "the contract is to seek back";
+    tester->m_file.close();
+}
+
+// A request for zero bytes never enters the loop and falls through to the
+// no-newline-found path, so it is an error rather than an empty success.
+TEST_F(FunctionalIO, ReadlineOfZeroBytesIsAnError) {
+    write_then_reopen_for_read(*tester, "abc\n");
+
+    U8 buffer[4];
+    FwSizeType size = 0;
+    ASSERT_EQ(Os::File::Status::OTHER_ERROR, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(0));
+    tester->m_file.close();
+}
+
+// The read loop works in FW_FILE_CHUNK_SIZE pieces, so a newline that lands
+// past the first chunk exercises the second iteration and the `i` offset
+// arithmetic that goes with it.
+TEST_F(FunctionalIO, ReadlineFindsANewlineBeyondTheFirstChunk) {
+    const FwSizeType filler = static_cast<FwSizeType>(FW_FILE_CHUNK_SIZE) + 10;
+    std::vector<U8> content(filler, static_cast<U8>('x'));
+    content.push_back(static_cast<U8>('\n'));
+    content.push_back(static_cast<U8>('z'));
+    write_then_reopen_for_read(*tester, content.data(), static_cast<FwSizeType>(content.size()));
+
+    std::vector<U8> buffer(content.size() + 16, 0);
+    FwSizeType size = static_cast<FwSizeType>(buffer.size());
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.readline(buffer.data(), size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, filler + 1) << "the line runs to the newline in the second chunk";
+
+    FwSizeType position = 0;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
+    ASSERT_EQ(position, filler + 1);
+    tester->m_file.close();
+}
+
+// Mode checks come before anything touches the file.
+TEST_F(Functionality, ReadlineOnAClosedFileIsNotOpened) {
+    U8 buffer[8];
+    FwSizeType size = sizeof(buffer);
+    ASSERT_EQ(Os::File::Status::NOT_OPENED, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(0));
+}
+
+TEST_F(FunctionalIO, ReadlineOnAFileOpenedForWriteIsInvalidMode) {
+    Os::Test::FileTest::Tester::OpenFileCreate open_rule(false);
+    open_rule.apply(*tester);
+
+    U8 buffer[8];
+    FwSizeType size = sizeof(buffer);
+    ASSERT_EQ(Os::File::Status::INVALID_MODE, tester->m_file.readline(buffer, size, Os::File::WaitType::NO_WAIT));
+    ASSERT_EQ(size, static_cast<FwSizeType>(0));
+    tester->m_file.close();
+}
+
+// seek_absolute is reachable from the suite only through readline; this is the
+// only direct exercise of it.
+TEST_F(FunctionalIO, SeekAbsoluteMovesToTheRequestedOffset) {
+    write_then_reopen_for_read(*tester, "0123456789");
+
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.seek_absolute(6));
+    FwSizeType position = 0;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
+    ASSERT_EQ(position, static_cast<FwSizeType>(6));
+
+    U8 byte = 0;
+    FwSizeType size = 1;
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.read(&byte, size));
+    ASSERT_EQ(byte, static_cast<U8>('6')) << "seeking absolute lands on the byte at that index";
+
+    // Seeking backwards is equally absolute, not relative.
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.seek_absolute(1));
+    ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
+    ASSERT_EQ(position, static_cast<FwSizeType>(1));
     tester->m_file.close();
 }

@@ -891,13 +891,35 @@ Phases 1–9 verifiable and Phase 10 not.
       it means `FW_*_HANDLE_MAX_SIZE` changes that ripple into every downstream
       deployment's `PlatformCfg`.
 
-      **The next slice is a test-writing job, not a porting one.** `Os::File`
-      has the most movable logic in the OSAL (~131 syscall-free lines), but
-      `readline` (48 of them) and `seek_absolute` have *zero* coverage — the
-      good half and the tested half do not overlap. Writing those tests against
-      the `SyntheticFile` shadow that already models everything they need makes
-      `File` the better candidate on every axis; porting it first would be
-      porting into the dark.
+      **The next slice was a test-writing job, and it is done.** `Os::File`
+      has the most movable logic in the OSAL (~131 syscall-free lines), but its
+      good half and its tested half did not overlap: `readline` — 48 lines of
+      chunked reading, newline scanning and position bookkeeping — had **no
+      test at all**, and exactly one caller in the tree (`Os/Linux/Cpu.cpp`,
+      Linux-only). `seek_absolute` had one assert test and no functional one.
+      Porting either would have been porting into the dark.
+
+      Nine cases now cover them, in the shared `Os/test/ut/file/CommonTests.cpp`
+      so any implementation gets them. They pin the behaviour that exists
+      rather than the behaviour one might expect, and two of those are worth
+      naming because they are asymmetric:
+
+      * **Hitting end-of-file is a success, not an error.** An unterminated
+        final line comes back as `OP_OK` with the bytes that were read — and
+        it is the one exit path in `readline` that does *not* restore the
+        original position. Every other path seeks back.
+      * **Asking for zero bytes is an error.** The loop never runs, so the
+        call falls through to the no-newline-found path and returns
+        `OTHER_ERROR` rather than an empty success.
+
+      Checked by mutation, since a test that has never failed proves nothing:
+      dropping the newline from the returned line, leaving the position on the
+      newline instead of after it, discarding the unterminated tail, and
+      forgetting to seek back on the error path are all caught — the last two
+      by exactly one test each, both of them new.
+
+      With that in place `File` becomes the better candidate on every axis,
+      and it is where Phase 15 goes next.
 
 - [ ] **Phase 16 — The component runtime** *(months — this is the project)*.
       A Rust-native equivalent of `ActiveComponentBase`/`QueuedComponentBase`:
