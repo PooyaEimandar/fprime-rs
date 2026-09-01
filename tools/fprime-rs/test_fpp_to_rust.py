@@ -342,6 +342,101 @@ def an_unused_abstract_type_does_not_block_generation():
     assert [n for _, n, *_ in model.structs] == ["Plain"], model.structs
 
 
+@case
+def a_filter_that_hides_a_referenced_type_is_refused():
+    """`--modules` filters what is EMITTED, not what is REFERENCED.
+
+    A struct inside the filter can have a member whose type sits outside it,
+    and the result is a Rust file naming a type nobody declared. That used to
+    surface as a cargo build error against a checked-in artifact, which is the
+    wrong place to find out -- the model knew.
+    """
+    source = """
+        module Other {
+          struct Payload {
+            n: U32
+          }
+        }
+        module Keep {
+          struct Holder {
+            body: Other.Payload
+          }
+        }
+        """
+    try:
+        build(source, ["Keep"])
+    except G.GeneratorError as exc:
+        assert "Other.Payload" in str(exc), exc
+        assert "Keep.Holder" in str(exc), exc
+    else:
+        raise AssertionError("a dangling cross-module reference was emitted")
+
+    # Widening the filter is exactly the fix the message names.
+    model = build(source, ["Keep", "Other"])
+    assert sorted(n for _, n, *_ in model.structs) == ["Holder", "Payload"], model.structs
+
+
+@case
+def emission_order_does_not_follow_the_source_order():
+    """Two orderings of the same sources must produce the same file.
+
+    The AST follows the order sources are passed, so without a deterministic
+    sort the same model emits a different file depending on how a caller
+    happened to list its dependencies -- which makes a checked-in artifact and
+    its CI diff fragile for no reason.
+    """
+    first = build(
+        """
+        module Bee {
+          enum Second { X = 0 }
+        }
+        module Ay {
+          enum First { X = 0 }
+        }
+        """
+    )
+    second = build(
+        """
+        module Ay {
+          enum First { X = 0 }
+        }
+        module Bee {
+          enum Second { X = 0 }
+        }
+        """
+    )
+    # The models may hold their definitions in different orders; the emitted
+    # file may not.
+    assert G.generate(first, "m") == G.generate(second, "m")
+
+
+@case
+def a_type_inside_a_state_machine_is_emitted():
+    """The second scope kind, and the one the omission guard found.
+
+    `Svc/ComAggregator` defines a `State` enum inside a state machine, which
+    fpp-to-cpp emits as `Svc::AggregationMachine_State`. It is worth its own
+    case because a state machine's `members` are an FPP Option rather than the
+    plain list a module or component carries -- adding the kind to SCOPE_KINDS
+    was not enough on its own, and the guard kept failing until the Option was
+    unwrapped.
+    """
+    model = build(
+        """
+        module M {
+          state machine Machine {
+            enum Phase: U8 { IDLE = 0, BUSY = 1 }
+            initial enter S
+            state S
+          }
+        }
+        """
+    )
+    names = {(path, name) for path, name, *_ in model.enums}
+    assert (("M", "Machine"), "Phase") in names, names
+    assert G.rust_name(("M", "Machine"), "Phase") == "MMachinePhase"
+
+
 def main():
     # `--require-tools` is what CI passes. Without it a missing fpp-to-json is
     # a skip, which is convenient locally and would be dangerous in CI: a

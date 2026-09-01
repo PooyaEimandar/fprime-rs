@@ -10,6 +10,14 @@
 /// Types generated from FPP models by tools/fprime-rs/fpp_to_rust.py.
 pub mod generated {
     pub mod com_cfg;
+    // Checked in to keep the Phase 14 generator work from rotting: this is the
+    // first real framework module the type generator could emit at all, and it
+    // is the one that exercises the two capabilities that unblocked it -- an
+    // FPP abstract type (`Fw.Buffer`, mirrored by hand in
+    // fprime-core/src/fw_buffer.rs) and arrays sized by named constants
+    // (`ComQueueComPorts`, `ComQueueBufferPorts`) rather than literals. CI
+    // regenerates it and diffs.
+    pub mod com_queue;
     pub mod fprime_protocol;
     pub mod rust_demo_glue;
 }

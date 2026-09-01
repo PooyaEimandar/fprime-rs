@@ -20,33 +20,47 @@
 use fprime_config::*;
 use fprime_core::{DeserReader, Endianness, SerBuffer, SerError, SerResult};
 
-/// FPP `TimeBase` (enum), serialized as `u16`.
+/// FPP `ComCfg.Apid` (enum), serialized as `u16`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimeBase(pub u16);
+pub struct ComCfgApid(pub u16);
 
-impl Default for TimeBase {
+impl Default for ComCfgApid {
     fn default() -> Self {
-        Self(0)
+        Self(2048)
     }
 }
 
-impl TimeBase {
+impl ComCfgApid {
     /// Matches the autocoded C++ `SERIALIZED_SIZE`.
     pub const SERIALIZED_SIZE: usize = core::mem::size_of::<u16>();
 
-    pub const TB_NONE: u16 = 0;
-    pub const TB_PROC_TIME: u16 = 1;
-    pub const TB_WORKSTATION_TIME: u16 = 2;
-    pub const TB_SC_TIME: u16 = 3;
-    pub const TB_DONT_CARE: u16 = 65535;
+    pub const FW_PACKET_COMMAND: u16 = 0;
+    pub const FW_PACKET_TELEM: u16 = 1;
+    pub const FW_PACKET_LOG: u16 = 2;
+    pub const FW_PACKET_FILE: u16 = 3;
+    pub const FW_PACKET_PACKETIZED_TLM: u16 = 4;
+    pub const FW_PACKET_DP: u16 = 5;
+    pub const FW_PACKET_IDLE: u16 = 6;
+    pub const FW_PACKET_PARAM: u16 = 7;
+    pub const FW_PACKET_HAND: u16 = 254;
+    pub const FW_PACKET_UNKNOWN: u16 = 255;
+    pub const SPP_IDLE_PACKET: u16 = 2047;
+    pub const INVALID_UNINITIALIZED: u16 = 2048;
 
     /// Mirrors the generated C++ `isValid()`.
     pub fn is_valid(value: u16) -> bool {
-        value == Self::TB_NONE
-            || value == Self::TB_PROC_TIME
-            || value == Self::TB_WORKSTATION_TIME
-            || value == Self::TB_SC_TIME
-            || value == Self::TB_DONT_CARE
+        value == Self::FW_PACKET_COMMAND
+            || value == Self::FW_PACKET_TELEM
+            || value == Self::FW_PACKET_LOG
+            || value == Self::FW_PACKET_FILE
+            || value == Self::FW_PACKET_PACKETIZED_TLM
+            || value == Self::FW_PACKET_DP
+            || value == Self::FW_PACKET_IDLE
+            || value == Self::FW_PACKET_PARAM
+            || value == Self::FW_PACKET_HAND
+            || value == Self::FW_PACKET_UNKNOWN
+            || value == Self::SPP_IDLE_PACKET
+            || value == Self::INVALID_UNINITIALIZED
     }
 
     pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, mode: Endianness) -> SerResult {
@@ -104,47 +118,33 @@ impl ComCfgPvn {
     }
 }
 
-/// FPP `ComCfg.Apid` (enum), serialized as `u16`.
+/// FPP `TimeBase` (enum), serialized as `u16`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ComCfgApid(pub u16);
+pub struct TimeBase(pub u16);
 
-impl Default for ComCfgApid {
+impl Default for TimeBase {
     fn default() -> Self {
-        Self(2048)
+        Self(0)
     }
 }
 
-impl ComCfgApid {
+impl TimeBase {
     /// Matches the autocoded C++ `SERIALIZED_SIZE`.
     pub const SERIALIZED_SIZE: usize = core::mem::size_of::<u16>();
 
-    pub const FW_PACKET_COMMAND: u16 = 0;
-    pub const FW_PACKET_TELEM: u16 = 1;
-    pub const FW_PACKET_LOG: u16 = 2;
-    pub const FW_PACKET_FILE: u16 = 3;
-    pub const FW_PACKET_PACKETIZED_TLM: u16 = 4;
-    pub const FW_PACKET_DP: u16 = 5;
-    pub const FW_PACKET_IDLE: u16 = 6;
-    pub const FW_PACKET_PARAM: u16 = 7;
-    pub const FW_PACKET_HAND: u16 = 254;
-    pub const FW_PACKET_UNKNOWN: u16 = 255;
-    pub const SPP_IDLE_PACKET: u16 = 2047;
-    pub const INVALID_UNINITIALIZED: u16 = 2048;
+    pub const TB_NONE: u16 = 0;
+    pub const TB_PROC_TIME: u16 = 1;
+    pub const TB_WORKSTATION_TIME: u16 = 2;
+    pub const TB_SC_TIME: u16 = 3;
+    pub const TB_DONT_CARE: u16 = 65535;
 
     /// Mirrors the generated C++ `isValid()`.
     pub fn is_valid(value: u16) -> bool {
-        value == Self::FW_PACKET_COMMAND
-            || value == Self::FW_PACKET_TELEM
-            || value == Self::FW_PACKET_LOG
-            || value == Self::FW_PACKET_FILE
-            || value == Self::FW_PACKET_PACKETIZED_TLM
-            || value == Self::FW_PACKET_DP
-            || value == Self::FW_PACKET_IDLE
-            || value == Self::FW_PACKET_PARAM
-            || value == Self::FW_PACKET_HAND
-            || value == Self::FW_PACKET_UNKNOWN
-            || value == Self::SPP_IDLE_PACKET
-            || value == Self::INVALID_UNINITIALIZED
+        value == Self::TB_NONE
+            || value == Self::TB_PROC_TIME
+            || value == Self::TB_WORKSTATION_TIME
+            || value == Self::TB_SC_TIME
+            || value == Self::TB_DONT_CARE
     }
 
     pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, mode: Endianness) -> SerResult {

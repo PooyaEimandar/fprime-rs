@@ -227,10 +227,17 @@ EMITTED_KINDS = ("DefStruct", "DefEnum", "DefArray")
 # Node kinds whose body may hold type definitions. A component is one of them:
 # `Svc/PassiveRateGroup/PassiveRateGroup.fpp` defines its `CycleTime` array
 # inside the component, which `fpp-to-cpp` emits as
-# `Svc::PassiveRateGroup_CycleTime`. Treating the component as another path
-# segment gives the same identity after flattening, and build_model's
-# collision check still protects it.
-SCOPE_KINDS = ("DefModule", "DefComponent")
+# `Svc::PassiveRateGroup_CycleTime`. A state machine is another:
+# `Svc/ComAggregator` defines a `State` enum inside `AggregationMachine`, which
+# becomes `Svc::AggregationMachine_State`. Both use the same `<Scope>_<Name>`
+# shape, so treating the scope as another path segment gives the same identity
+# after flattening, and build_model's collision check still protects it.
+#
+# This list is not guessed at: count_definitions below refuses to emit a file
+# when a definition is unreachable from these, which is how DefStateMachine
+# was found -- four framework modules failed with a count mismatch rather than
+# silently dropping a type.
+SCOPE_KINDS = ("DefModule", "DefComponent", "DefStateMachine")
 
 
 def count_definitions(node):
@@ -266,7 +273,13 @@ def iter_definitions(ast):
             for kind, wrapper in node.items():
                 if kind in SCOPE_KINDS:
                     data, _ = unwrap(wrapper["node"])
-                    walk(data["members"], path + [data["name"]])
+                    # A module's and a component's members are a plain list; a
+                    # state machine's are an FPP Option wrapping one. Both are
+                    # scopes, so both are walked.
+                    members = data.get("members")
+                    if not isinstance(members, list):
+                        members = opt(members) or []
+                    walk(members, path + [data["name"]])
                 elif kind in DEFINITION_KINDS:
                     data, node_id = unwrap(wrapper["node"])
                     collected.append((tuple(path), kind, data, node_id))
@@ -447,7 +460,63 @@ def build_model(ast, analysis, wanted_modules=None):
             pass  # registered above; nothing to emit
         else:
             raise GeneratorError(f"{where}: unhandled definition kind '{kind}'")
+
+    check_emitted_types_are_complete(model, wanted_modules)
     return model
+
+
+def check_emitted_types_are_complete(model, wanted_modules):
+    """Refuse to emit a file that references a type it does not define.
+
+    `--modules` filters what is emitted but not what is *referenced*: a struct
+    inside the filter can have a member whose type sits outside it, and the
+    result is a file that names a Rust type nobody declared. That fails at
+    `cargo build` rather than here, which is the wrong place -- the model knew.
+    Same rule as the scope walker: an omission is an error, not an output.
+    """
+    if wanted_modules is None:
+        return
+    emitted = set()
+    for path, name, *_ in model.structs:
+        emitted.add(rust_name(path, name))
+    for path, name, *_ in model.enums:
+        emitted.add(rust_name(path, name))
+    for path, name, *_ in model.arrays:
+        emitted.add(rust_name(path, name))
+
+    missing = {}
+    for group, where_of in (
+        (model.structs, lambda entry: ".".join(list(entry[0]) + [entry[1]])),
+        (model.arrays, lambda entry: ".".join(list(entry[0]) + [entry[1]])),
+    ):
+        for entry in group:
+            where = where_of(entry)
+            # structs carry (path, name, fields, defaults); arrays carry
+            # (path, name, elt_desc, count, defaults).
+            descs = (
+                [desc for _, desc, _ in entry[2]] if group is model.structs else [entry[2]]
+            )
+            for desc in descs:
+                if desc[0] != "named":
+                    continue
+                referenced_path, referenced_name = model.by_node_id[desc[1]]
+                flat = rust_name(referenced_path, referenced_name)
+                if flat not in emitted:
+                    missing.setdefault(
+                        ".".join(list(referenced_path) + [referenced_name]), []
+                    ).append(where)
+    if missing:
+        detail = "; ".join(
+            f"{referenced} (used by {', '.join(sorted(set(users)))})"
+            for referenced, users in sorted(missing.items())
+        )
+        modules = sorted({referenced.split(".")[0] for referenced in missing})
+        raise GeneratorError(
+            f"--modules {' '.join(wanted_modules)} excludes types that the "
+            f"emitted ones refer to: {detail}. The generated file would name "
+            f"Rust types it does not define. Add {' '.join(modules)} to "
+            f"--modules, or drop the filter."
+        )
 
 
 def collect_enum_constants(data, value_map):
@@ -884,11 +953,20 @@ def generate(model, module_name):
     for use_path in sorted(model.abs_imports):
         out.append(f"use {use_path};")
     out.append("")
-    for path, name, repr_rust, constants, default_value in model.enums:
+    # Sorted by qualified name, not left in AST order. The AST order follows
+    # the order the sources were passed on the command line, so without this
+    # the same model emits a different file depending on how the caller
+    # happened to list its dependencies -- which makes a checked-in artifact
+    # and its CI diff fragile for no reason. Rust does not care about
+    # declaration order, so this costs nothing.
+    def qualified(entry):
+        return ".".join(list(entry[0]) + [entry[1]])
+
+    for path, name, repr_rust, constants, default_value in sorted(model.enums, key=qualified):
         emit_enum(model, path, name, repr_rust, constants, default_value, out)
-    for path, name, elt, count, default_elems in model.arrays:
+    for path, name, elt, count, default_elems in sorted(model.arrays, key=qualified):
         emit_array(model, path, name, elt, count, default_elems, out)
-    for path, name, fields, defaults in model.structs:
+    for path, name, fields, defaults in sorted(model.structs, key=qualified):
         emit_struct(model, path, name, fields, defaults, out)
     return "\n".join(out)
 

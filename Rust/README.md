@@ -812,12 +812,52 @@ Phases 1–9 verifiable and Phase 10 not.
       with neither an FPP stand-in nor a mirror is still refused by name, and
       the message says which of the two it would need.
 
+      **`Svc/ComQueue`'s types are now checked in, so the capability cannot
+      rot.** `Rust/fprime-svc/src/generated/com_queue.rs` is there because it
+      exercises exactly what unblocked it — an abstract type via the mirror,
+      and arrays sized by named constants (`ComQueueComPorts`,
+      `ComQueueBufferPorts`) rather than literals. Its sizes match the
+      autocoder's, 2 and 1. CI regenerates and diffs it alongside the others.
+
+      Checking it in surfaced two more generator defects, and a survey across
+      the whole framework surfaced a third. **132 of the 144 modules with an
+      FPP model now generate**, and the twelve that do not fail for exactly
+      three reasons: eight on fixed-capacity string members, four on defaults
+      for nested struct or array members. Nothing fails for an unknown reason,
+      which is the useful part of the number.
+
+      The third defect is the omission guard paying for itself. Four modules
+      failed with "the model holds N type definitions but only N-1 are
+      reachable" rather than silently dropping a type — the unwalked scope was
+      `DefStateMachine`, which `Svc/ComAggregator` uses to define a `State`
+      enum that `fpp-to-cpp` emits as `Svc::AggregationMachine_State`. Adding
+      the kind was not enough on its own: a state machine's `members` are an
+      FPP `Option` rather than the plain list a module or component carries,
+      and the guard kept failing until that was unwrapped. Without it the
+      generator would have written four files that each looked complete.
+
+      The other two are the same family as the scope omission. **`--modules` filtered what was emitted but not
+      what was referenced**, so a struct inside the filter could name a type
+      outside it and the generator would write a file referencing a Rust type
+      nobody declared — found at `cargo build`, which is the wrong place,
+      because the model knew. It is an error now, naming the type, its user,
+      and the module to add. And **emission order followed the order the
+      sources were listed on the command line**, so the same model produced
+      different files depending on how a caller ordered its dependencies.
+      Types are emitted sorted by qualified name now: Rust does not care about
+      declaration order, so it costs nothing, and it is what makes a
+      checked-in artifact safe to diff at all.
+
       `tools/fprime-rs/test_fpp_to_rust.py` is the generator's first test
-      suite — 13 cases over the resolution paths above, the omission guard,
-      abstract aliasing and refusal, and the flattened-name collision check.
-      CI passes `--require-tools` so a broken venv fails loudly instead of
-      skipping every case. Every checked-in generated artifact is
-      byte-identical after all of this, so it is purely additive.
+      suite — 15 cases over the resolution paths above, the omission guard,
+      the cross-module reference check, emission determinism, abstract
+      aliasing and refusal, and the flattened-name collision check. CI passes
+      `--require-tools` so a broken venv fails loudly instead of skipping
+      every case.
+
+      The one checked-in artifact that changed is `com_cfg.rs`, and only in
+      the order its types appear — the deterministic-emission fix below. The
+      rest are byte-identical.
 
 - [~] **Phase 15 — started: `Os::RawTime`'s interval arithmetic.** *(weeks
       remaining)*. The goal is `Os::File`, `FileSystem`, `Directory`, `Task`,
@@ -918,8 +958,59 @@ Phases 1–9 verifiable and Phase 10 not.
       forgetting to seek back on the error path are all caught — the last two
       by exactly one test each, both of them new.
 
-      With that in place `File` becomes the better candidate on every axis,
-      and it is where Phase 15 goes next.
+      **And then `File` turned out not to be the next slice either.** With the
+      oracle finally reaching it, reading the file closed the question the
+      other way. Its CRC path delegates to `Utils::Hash`, which has been Rust
+      since Phase 1 — the same "already Rust underneath" argument that ended
+      Phase 14. `seek_absolute`'s only interesting branch, the three-seek
+      decomposition, is unreachable on a 64-bit host, so porting it would be
+      porting dead code. What is left of `readline` once the guards, the I/O
+      and the seeks stay in C++ is about ten lines of newline scanning and
+      offset arithmetic. The tests were worth writing on their own merits;
+      the port they were meant to unblock is not worth doing.
+
+      **The structural finding, measured.** Every Posix delegate except the
+      one already ported sits *exactly* on its `FW_*_HANDLE_MAX_SIZE`:
+
+      | implementation | size | limit | headroom |
+      | --- | --- | --- | --- |
+      | `PosixFile` | 16 | 16 | 0 |
+      | `PosixDirectory` | 16 | 16 | 0 |
+      | `PosixFileSystem` | 16 | 16 | 0 |
+      | `PosixTask` | 40 | 40 | 0 |
+      | `PosixMutex` | 72 | 72 | 0 |
+      | `PosixConditionVariable` | 56 | 56 | 0 |
+      | `PosixRawTime` | 24 | 56 | 32 |
+
+      (`sizeof` each implementation class against the constant in
+      `default/config/PlatformCfg.fpp`, compiled against this tree.)
+
+      A delegate is placement-new'd into storage bounded by that constant and
+      checked by a `static_assert` in `Os/Delegate.hpp`. So **a Rust-backed
+      delegate that owns any state at all does not fit in six of the seven**,
+      and making it fit means raising a constant that every downstream
+      deployment's `PlatformCfg` inherits. `RawTime` was portable precisely
+      because Rust stores nothing there and never needed its 32 spare bytes.
+
+      **What that means for the phase.** The OSAL is not shaped like the `Fw`
+      serialization code. It is a syscall veneer with small islands of pure
+      logic inside it — 45 lines here, 10 lines there — separated by guards
+      that must stay in C++, `errno` reads that cannot be split from their
+      syscalls, and delegates that are already Rust underneath. The two
+      genuinely substantial bodies of logic left are `PriorityMemQueue` (809
+      lines, but 34 atomics and memory-ordering comments — concurrency, not
+      arithmetic) and `Os::Task`'s scheduling semantics (whose suite never
+      passes a non-default priority or stack size, so the oracle is blind on
+      exactly the movable code).
+
+      So Phase 15 as originally stated — "a deployment runs with the Rust
+      OSAL selected" — is not reachable by porting the Posix implementation
+      body by body, and pretending otherwise would repeat Phase 14's mistake
+      one layer down. The honest reframing is that a Rust OSAL is worth
+      writing as a *new implementation for a target that needs one*, where the
+      handle budget is set alongside it, rather than as a re-implementation of
+      a Posix layer that is already thin. Recorded here rather than acted on:
+      that is a project decision, not a refactor.
 
 - [ ] **Phase 16 — The component runtime** *(months — this is the project)*.
       A Rust-native equivalent of `ActiveComponentBase`/`QueuedComponentBase`:

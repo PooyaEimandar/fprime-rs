@@ -300,6 +300,23 @@ jobs:
             default/config/FpConfig.fpp default/config/FpConstants.fpp \
             default/config/ComCfg.fpp
           diff -u Rust/fprime-svc/src/generated/com_cfg.rs /tmp/com_cfg.rs
+          # The first real framework module the type generator could emit at
+          # all. It is here because it exercises the two Phase 14 capabilities
+          # that unblocked it -- an FPP abstract type (Fw.Buffer, mirrored by
+          # hand) and arrays sized by named constants rather than literals --
+          # and nothing else would notice if either regressed.
+          python3 tools/fprime-rs/fpp_to_rust.py \
+            --module-name "Svc/ComQueue/ComQueue.fpp" --modules Svc ComCfg \
+            --out /tmp/com_queue.rs \
+            cmake/platform/unix/Platform/PlatformTypes.fpp \
+            default/config/FpConfig.fpp default/config/FpConstants.fpp \
+            default/config/AcConstants.fpp default/config/ComCfg.fpp \
+            Fw/Buffer/Buffer.fpp Fw/Cmd/Cmd.fpp Fw/Com/Com.fpp Fw/Log/Log.fpp \
+            Fw/Ports/SuccessCondition/SuccessCondition.fpp Fw/Time/Time.fpp \
+            Fw/Tlm/Tlm.fpp Fw/Types/Types.fpp \
+            Svc/Ports/CommsPorts/CommsPorts.fpp Svc/Sched/Sched.fpp \
+            Svc/ComQueue/ComQueue.fpp
+          diff -u Rust/fprime-svc/src/generated/com_queue.rs /tmp/com_queue.rs
           python3 tools/fprime-rs/fpp_to_rust.py \
             --module-name "Svc/RustDemo/RustDemo.fpp" --component RustDemo \
             --out /tmp/rust_demo_glue.rs --out-header /tmp/RustDemoGlue.h \
