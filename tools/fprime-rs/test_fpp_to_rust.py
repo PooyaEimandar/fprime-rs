@@ -437,6 +437,105 @@ def a_type_inside_a_state_machine_is_emitted():
     assert G.rust_name(("M", "Machine"), "Phase") == "MMachinePhase"
 
 
+@case
+def a_sized_string_member_carries_its_capacity():
+    """`string size N` is a length token plus up to N characters.
+
+    The capacity is part of the Rust type so SERIALIZED_SIZE stays a compile
+    time constant, matching Fw::StringBase::STATIC_SERIALIZED_SIZE(N).
+    """
+    model = build(
+        """
+        type FwSizeStoreType = U16
+        module M {
+          struct Named {
+            label: string size 80
+          }
+        }
+        """
+    )
+    fields = next(f for _, name, f, _ in model.structs if name == "Named")
+    kind, capacity, size = next(desc for n, desc, _ in fields if n == "label")
+    assert kind == "string", kind
+    assert capacity == 80, capacity
+    assert size == 2 + 80, size
+
+
+@case
+def a_string_sized_by_a_constant_resolves():
+    """Same as every array bound in the framework: a named constant, not a
+    literal."""
+    model = build(
+        """
+        type FwSizeStoreType = U16
+        module M {
+          constant Width = 24
+          struct Named {
+            label: string size Width
+          }
+        }
+        """
+    )
+    fields = next(f for _, name, f, _ in model.structs if name == "Named")
+    _, capacity, _ = next(desc for n, desc, _ in fields if n == "label")
+    assert capacity == 24, capacity
+
+
+@case
+def a_struct_literal_default_is_folded():
+    """`default [ { a = 1, b = 2 } ]` -- FPP folds the whole literal, so the
+    members arrive as resolved values rather than as AST nodes."""
+    model = build(
+        """
+        module M {
+          struct Entry {
+            first: U32
+            second: U8
+          }
+          array Entries = [2] Entry default [
+            { first = 7, second = 1 },
+            { first = 9, second = 2 }
+          ]
+        }
+        """
+    )
+    _, _, _, count, defaults = next(
+        a for a in model.arrays if a[1] == "Entries"
+    )
+    assert count == 2, count
+    assert defaults is not None and len(defaults) == 2, defaults
+    rendered = G.generate(model, "m")
+    assert "MEntry {" in rendered, rendered[:400]
+    assert "first: 7" in rendered and "second: 2" in rendered
+
+
+@case
+def an_array_default_named_by_a_constant_is_not_broadcast():
+    """The case that needed the valueMap.
+
+    A default written as a named constant and a scalar default meant for every
+    element are the same shape in the AST -- one non-literal node. Only FPP's
+    folded value distinguishes them, and getting it wrong silently fills every
+    element with the whole array.
+    """
+    model = build(
+        """
+        module M {
+          array Row = [2] U32
+          constant ROWS = [ [1, 2], [3, 4] ]
+          array Table = [2] Row default ROWS
+        }
+        """
+    )
+    _, _, _, count, defaults = next(a for a in model.arrays if a[1] == "Table")
+    assert count == 2, count
+    assert len(defaults) == 2, defaults
+    rendered = G.generate(model, "m")
+    # Element-wise: two distinct rows, not the same value twice.
+    assert "MRow([1, 2])" in rendered, rendered[rendered.find("impl Default for MTable"):][:300]
+    assert "MRow([3, 4])" in rendered
+
+
 def main():
     # `--require-tools` is what CI passes. Without it a missing fpp-to-json is
     # a skip, which is convenient locally and would be dangerous in CI: a

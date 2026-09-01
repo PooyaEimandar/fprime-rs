@@ -820,11 +820,11 @@ Phases 1–9 verifiable and Phase 10 not.
       autocoder's, 2 and 1. CI regenerates and diffs it alongside the others.
 
       Checking it in surfaced two more generator defects, and a survey across
-      the whole framework surfaced a third. **132 of the 144 modules with an
-      FPP model now generate**, and the twelve that do not fail for exactly
-      three reasons: eight on fixed-capacity string members, four on defaults
-      for nested struct or array members. Nothing fails for an unknown reason,
-      which is the useful part of the number.
+      the whole framework surfaced a third and then drove the rest of the work
+      below. **143 of the 144 modules with an FPP model now generate**, up
+      from 130 when the survey started. The one that does not names its own
+      reason: `Svc/FpySequencer` needs a mirror for the abstract type
+      `Fw.StatementArgBuffer`, the same treatment `Fw.Buffer` already has.
 
       The third defect is the omission guard paying for itself. Four modules
       failed with "the model holds N type definitions but only N-1 are
@@ -835,6 +835,35 @@ Phases 1–9 verifiable and Phase 10 not.
       FPP `Option` rather than the plain list a module or component carries,
       and the guard kept failing until that was unwrapped. Without it the
       generator would have written four files that each looked complete.
+
+      **Fixed-capacity strings.** `string size N` was the largest remaining
+      blocker, at eight modules. It serializes as a `FwSizeStoreType` length
+      token followed by up to `N` characters — variable on the wire, bounded
+      in memory — so `Rust/fprime-core/src/fpp_string.rs` carries the capacity
+      as a const generic. That keeps `SERIALIZED_SIZE` a compile-time constant
+      matching `Fw::StringBase::STATIC_SERIALIZED_SIZE(N)`, which is what lets
+      a generated struct sum its members the way the autocoded C++ does:
+      `Svc::CustomVersionDb` reads `… + FwString::<80>::SERIALIZED_SIZE + …`
+      against the C++'s `… + Fw::StringBase::STATIC_SERIALIZED_SIZE(80) + …`.
+      The length-token handling itself is Phase 8's `ser_bytes`/`deser_bytes`,
+      already tested. Unlike the C++ the Rust is not NUL-terminated: nothing
+      here hands out a `const char*`, so the length is the length and there is
+      no reserved byte.
+
+      **Defaults for nested struct and array members**, the last four. FPP
+      folds a default expression whole, so `default [ { a = 0, b = X } ]`
+      arrives as one `AnonStruct` value with its members already evaluated
+      rather than as AST nodes — which meant splitting the folder into a
+      node-taking half and a value-taking half that can recurse.
+
+      One of those four was a real bug rather than a missing feature. An array
+      default written as a named constant (`Svc/TlmPacketizer`'s
+      `TELEMETRY_SECTION_DEFAULTS`) and a scalar default meant for every
+      element are *the same shape in the AST* — a single non-literal node — so
+      the generator broadcast the whole array into every element. Only FPP's
+      folded value distinguishes them. Array defaults are resolved through the
+      valueMap now, and a test pins that the two rows of a nested default stay
+      distinct rather than becoming the same row twice.
 
       The other two are the same family as the scope omission. **`--modules` filtered what was emitted but not
       what was referenced**, so a struct inside the filter could name a type
@@ -849,9 +878,10 @@ Phases 1–9 verifiable and Phase 10 not.
       checked-in artifact safe to diff at all.
 
       `tools/fprime-rs/test_fpp_to_rust.py` is the generator's first test
-      suite — 15 cases over the resolution paths above, the omission guard,
-      the cross-module reference check, emission determinism, abstract
-      aliasing and refusal, and the flattened-name collision check. CI passes
+      suite — 20 cases over the resolution paths above, the omission guard,
+      the cross-module reference check, emission determinism, both scope
+      kinds, sized strings, struct and array defaults, abstract aliasing and
+      refusal, and the flattened-name collision check. CI passes
       `--require-tools` so a broken venv fails loudly instead of skipping
       every case.
 

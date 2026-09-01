@@ -152,6 +152,25 @@ def opt(value):
     return value["Some"]
 
 
+# `Fw::StringBase::STATIC_SERIALIZED_SIZE(N)` is sizeof(FwSizeStoreType) + N,
+# and FwSizeStoreType is a U16 in every configuration this generator supports
+# (Rust/RustConfigCheck.cpp static_asserts the width on the C++ side).
+STRING_LENGTH_TOKEN_BYTES = 2
+
+
+def resolve_int_by_id(value_map, node_id, what):
+    """As `resolve_int`, for a node the typeMap references by id."""
+    entry = value_map.get(str(node_id))
+    if entry is None:
+        raise GeneratorError(f"{what}: FPP recorded no value for node {node_id}")
+    kind = next(iter(entry))
+    if kind in ("Integer", "PrimitiveInt"):
+        return int(entry[kind]["value"])
+    if kind == "EnumConstant":
+        return int(entry[kind]["value"][1])
+    raise GeneratorError(f"{what}: FPP resolved this to a {kind}, not an integer")
+
+
 def resolve_int(value_map, node, what):
     """The integer an expression node evaluates to.
 
@@ -310,7 +329,7 @@ def resolve_type(model, type_map, node_id):
         raise GeneratorError(f"no typeMap entry for AST node {node_id}")
     if isinstance(entry, dict) and "AbsType" in entry:
         return resolve_abstract(model, type_map, entry["AbsType"]["node"]["astNodeId"])
-    return classify(entry)
+    return classify(model, entry)
 
 
 def resolve_abstract(model, type_map, decl_id):
@@ -323,7 +342,7 @@ def resolve_abstract(model, type_map, decl_id):
     """
     target_id = model.abs_alias.get(decl_id) if model is not None else None
     if target_id is not None:
-        return classify(type_map[str(target_id)])
+        return classify(model, type_map[str(target_id)])
     qualified = (
         model.abs_types.get(decl_id, f"AST node {decl_id}")
         if model is not None
@@ -344,7 +363,7 @@ def resolve_abstract(model, type_map, decl_id):
     )
 
 
-def classify(entry):
+def classify(model, entry):
     """Classify a typeMap entry into ("prim"|"bool"|"string"|"named", ...).
 
     The JSON vocabulary nests differently per kind: integers appear as
@@ -355,9 +374,9 @@ def classify(entry):
     body = entry[kind]
 
     if kind == "Primitive":
-        return classify(body)
+        return classify(model, body)
     if kind == "AliasType":
-        return classify(body["aliasType"])
+        return classify(model, body["aliasType"])
     if kind == "Int":
         if "PrimitiveInt" in body:
             name = next(iter(body["PrimitiveInt"]["kind"]))
@@ -371,7 +390,25 @@ def classify(entry):
     if kind == "Boolean":
         return ("bool", None, 1)
     if kind == "String":
-        return ("string", None, None)
+        # An FPP `string size N` serializes as a FwSizeStoreType length token
+        # followed by up to N characters, so its capacity is part of its type.
+        # The size is an expression node, which means it can be a named
+        # constant like every array bound in the framework.
+        size = body.get("size")
+        if not isinstance(size, dict) or "Some" not in size:
+            raise GeneratorError(
+                "a string with no declared size needs the framework's default "
+                "capacity, which this generator does not carry; give the "
+                "member an explicit `string size N`"
+            )
+        node_id = size["Some"]["astNodeId"]
+        if model is None:
+            raise GeneratorError("string capacity cannot be resolved here")
+        capacity = resolve_int_by_id(model.value_map, node_id, "string size")
+        # Same mechanism the hand-written abstract mirrors use: the import is
+        # emitted only when the model actually contains a string.
+        model.abs_imports.add("fprime_core::fpp_string::FwString")
+        return ("string", capacity, STRING_LENGTH_TOKEN_BYTES + capacity)
     if kind in ("Struct", "Enum", "Array"):
         return ("named", body["node"]["astNodeId"], None)
     raise GeneratorError(f"unsupported type kind: {kind}")
@@ -392,6 +429,8 @@ class Model:
         self.value_map = {}  # AST node id -> FPP-evaluated value
         self.abs_types = {}  # AST node id -> qualified name of a `type Foo`
         self.abs_alias = {}  # abstract node id -> node id that carries its wire form
+        self.struct_fields = {}  # AST node id -> [(name, desc, count)]
+        self.array_elements = {}  # AST node id -> (element desc, count)
         self.abs_imports = set()  # `use` paths for hand-written abstract mirrors
 
 
@@ -451,11 +490,15 @@ def build_model(ast, analysis, wanted_modules=None):
             continue
         where = ".".join(list(path) + [data["name"]])
         if kind == "DefStruct":
-            model.structs.append(build_struct(model, type_map, path, data, where))
+            built = build_struct(model, type_map, path, data, where)
+            model.structs.append(built)
+            model.struct_fields[node_id] = built[2]
         elif kind == "DefEnum":
             model.enums.append(build_enum(model, type_map, path, data, node_id, where))
         elif kind == "DefArray":
-            model.arrays.append(build_array(model, type_map, path, data, where))
+            built = build_array(model, type_map, path, data, where)
+            model.arrays.append(built)
+            model.array_elements[node_id] = (built[2], built[3])
         elif kind == "DefAbsType":
             pass  # registered above; nothing to emit
         else:
@@ -545,11 +588,6 @@ def build_struct(model, type_map, path, data, where):
             desc = resolve_type(model, type_map, type_id)
         except GeneratorError as exc:
             raise GeneratorError(f"{where}.{member['name']}: {exc}") from exc
-        if desc[0] == "string":
-            raise GeneratorError(
-                f"{where}.{member['name']}: string members are not supported yet "
-                "(fixed-capacity FPP strings with length prefixes)"
-            )
         size_node = opt(member["size"])
         count = (
             resolve_int(
@@ -604,23 +642,30 @@ def build_array(model, type_map, path, data, where):
     count = resolve_int(model.value_map, data["size"], f"{where} array size")
     _, elt_id = unwrap(data["eltType"])
     elt = resolve_type(model, type_map, elt_id)
-    if elt[0] == "string":
-        raise GeneratorError(f"{where}: arrays of strings are not supported yet")
 
+    # Defaults are carried as resolved VALUES rather than AST nodes. FPP folds
+    # the whole default expression, which is the only way to tell an array
+    # default written as a named constant -- Svc.TlmPacketizer's
+    # TELEMETRY_SECTION_DEFAULTS -- from a scalar meant for every element. The
+    # AST alone cannot: both are a single non-literal node.
     default_elems = None
     default_node = opt(data.get("default"))
     if default_node is not None:
-        node_data, _ = unwrap(default_node)
-        if isinstance(node_data, dict) and "ExprArray" in node_data:
-            elts = node_data["ExprArray"]["elts"]
-            if len(elts) != count:
+        _, default_id = unwrap(default_node)
+        entry = model.value_map.get(str(default_id))
+        if entry is None:
+            raise GeneratorError(f"{where}: no resolved value for the default")
+        if next(iter(entry)) == "AnonArray":
+            elements = entry["AnonArray"]["elements"]
+            if len(elements) != count:
                 raise GeneratorError(
-                    f"{where}: default has {len(elts)} elements, array holds {count}"
+                    f"{where}: default has {len(elements)} elements, array "
+                    f"holds {count}"
                 )
-            default_elems = elts
+            default_elems = elements
         else:
-            # FPP also allows a scalar default applied to every element
-            default_elems = [default_node] * count
+            # FPP also allows a scalar default applied to every element.
+            default_elems = [entry] * count
     return (path, data["name"], elt, count, default_elems)
 
 
@@ -640,6 +685,17 @@ def fold_default(model, desc, node, where):
     entry = model.value_map.get(str(node_id))
     if entry is None:
         raise GeneratorError(f"{where}: no resolved value for default expression")
+    return fold_value(model, desc, entry, where)
+
+
+def fold_value(model, desc, entry, where):
+    """Render an already-resolved FPP value as Rust.
+
+    Split from `fold_default` because a struct literal's members arrive as
+    resolved values rather than as AST nodes -- FPP folds the whole literal
+    into one `AnonStruct` entry -- so the nested case cannot go back through
+    the valueMap by node id.
+    """
     kind = next(iter(entry))
     body = entry[kind]
 
@@ -661,15 +717,69 @@ def fold_default(model, desc, node, where):
     if desc[0] == "named":
         path, name = model.by_node_id[desc[1]]
         ty = rust_name(path, name)
-        if model.enum_consts.get(desc[1]) is None:
+        if model.enum_consts.get(desc[1]) is not None:
+            if kind == "EnumConstant":
+                return f"{ty}({int(body['value'][1])})"
+            if kind in ("Integer", "PrimitiveInt"):
+                return f"{ty}({int(body['value'])})"
             raise GeneratorError(
-                f"{where}: defaults for nested struct/array members are not supported yet"
+                f"{where}: unsupported enum default value kind '{kind}'"
             )
-        if kind == "EnumConstant":
-            return f"{ty}({int(body['value'][1])})"
-        if kind in ("Integer", "PrimitiveInt"):
-            return f"{ty}({int(body['value'])})"
-        raise GeneratorError(f"{where}: unsupported enum default value kind '{kind}'")
+        # A struct default, e.g. the `default [ { a = 0, b = X } ]` on
+        # Svc.Ccsds.SdlsCfg.SaMap. FPP folds the whole literal, so each member
+        # arrives already evaluated and is rendered against its own type.
+        if kind == "AnonStruct":
+            fields = model.struct_fields.get(desc[1])
+            if fields is None:
+                raise GeneratorError(
+                    f"{where}: a struct default needs the struct's own "
+                    f"definition, which is not in this model"
+                )
+            members = body["members"]
+            parts = []
+            for member_name, member_desc, member_count in fields:
+                if member_count is not None:
+                    raise GeneratorError(
+                        f"{where}.{member_name}: defaults for a struct member "
+                        f"that is itself an array are not supported"
+                    )
+                if member_name not in members:
+                    raise GeneratorError(
+                        f"{where}: the default gives no value for member "
+                        f"'{member_name}'"
+                    )
+                parts.append(
+                    f"{member_name}: "
+                    + fold_value(
+                        model,
+                        member_desc,
+                        members[member_name],
+                        f"{where}.{member_name}",
+                    )
+                )
+            return ty + " { " + ", ".join(parts) + " }"
+        # An array default whose elements are themselves a named type, e.g.
+        # Svc.TlmPacketizer.SectionConfigs, an array of GroupConfigs arrays.
+        if kind == "AnonArray":
+            element = model.array_elements.get(desc[1])
+            if element is None:
+                raise GeneratorError(
+                    f"{where}: an array default needs the array's own "
+                    f"definition, which is not in this model"
+                )
+            element_desc, count = element
+            elements = body["elements"]
+            if len(elements) != count:
+                raise GeneratorError(
+                    f"{where}: the default has {len(elements)} elements, the "
+                    f"array holds {count}"
+                )
+            parts = [
+                fold_value(model, element_desc, value, f"{where}[{i}]")
+                for i, value in enumerate(elements)
+            ]
+            return ty + "([" + ", ".join(parts) + "])"
+        raise GeneratorError(f"{where}: unsupported default value kind '{kind}'")
     raise GeneratorError(f"{where}: cannot fold default for {desc[0]}")
 
 
@@ -684,6 +794,8 @@ def zero_value(model, desc, count):
         base = f"{rust_name(path, name)}::default()"
     elif desc[0] == "mirror":
         base = f"{desc[1]}::default()"
+    elif desc[0] == "string":
+        base = f"FwString::<{desc[1]}>::default()"
     else:
         raise GeneratorError(f"cannot default type kind: {desc[0]}")
     return f"[{base}; {count}]" if count else base
@@ -705,6 +817,8 @@ def field_rust_type(model, desc, count):
         base = rust_name(path, name)
     elif kind == "mirror":
         base = desc[1]
+    elif kind == "string":
+        base = f"FwString<{desc[1]}>"
     else:
         raise GeneratorError(f"unsupported field type in codegen: {kind}")
     return f"[{base}; {count}]" if count else base
@@ -721,6 +835,8 @@ def size_term(model, desc, count):
         base = f"{rust_name(path, name)}::SERIALIZED_SIZE"
     elif kind == "mirror":
         base = f"{desc[1]}::SERIALIZED_SIZE"
+    elif kind == "string":
+        base = f"FwString::<{desc[1]}>::SERIALIZED_SIZE"
     else:
         raise GeneratorError(f"cannot size type kind: {kind}")
     return f"{base} * {count}" if count else base
@@ -732,7 +848,7 @@ def emit_value_ser(desc, expr, indent):
         return f"{pad}buf.ser_{desc[1]}({expr}, mode)?;"
     if desc[0] == "bool":
         return f"{pad}buf.ser_bool({expr}, mode)?;"
-    if desc[0] in ("named", "mirror"):
+    if desc[0] in ("named", "mirror", "string"):
         return f"{pad}{expr}.serialize_to(buf, mode)?;"
     raise GeneratorError(f"unsupported serialize kind: {desc[0]}")
 
@@ -748,6 +864,8 @@ def emit_value_deser(model, desc, target, indent):
         return f"{pad}{target} = {rust_name(path, name)}::deserialize_from(buf, mode)?;"
     if desc[0] == "mirror":
         return f"{pad}{target} = {desc[1]}::deserialize_from(buf, mode)?;"
+    if desc[0] == "string":
+        return f"{pad}{target} = FwString::<{desc[1]}>::deserialize_from(buf, mode)?;"
     raise GeneratorError(f"unsupported deserialize kind: {desc[0]}")
 
 
@@ -796,7 +914,7 @@ def emit_struct(model, path, name, fields, defaults, out):
         if count:
             out.append(f"        for item in self.{ident}.iter() {{")
             out.append(
-                emit_value_ser(desc, "*item" if desc[0] not in ("named", "mirror") else "item", 12)
+                emit_value_ser(desc, "*item" if desc[0] not in ("named", "mirror", "string") else "item", 12)
             )
             out.append("        }")
         else:
@@ -889,8 +1007,8 @@ def emit_array(model, path, name, elt, count, default_elems, out):
         out.append(f"        Self([{zero_value(model, elt, None)}; {count}])")
     else:
         values = ", ".join(
-            fold_default(model, elt, node, f"{where}[{i}]")
-            for i, node in enumerate(default_elems)
+            fold_value(model, elt, value, f"{where}[{i}]")
+            for i, value in enumerate(default_elems)
         )
         out.append(f"        Self([{values}])")
     out.append("    }")
@@ -906,7 +1024,7 @@ def emit_array(model, path, name, elt, count, default_elems, out):
         "    pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, mode: Endianness) -> SerResult {"
     )
     out.append("        for item in self.0.iter() {")
-    out.append(emit_value_ser(elt, "*item" if elt[0] not in ("named", "mirror") else "item", 12))
+    out.append(emit_value_ser(elt, "*item" if elt[0] not in ("named", "mirror", "string") else "item", 12))
     out.append("        }")
     out.append("        Ok(())")
     out.append("    }")

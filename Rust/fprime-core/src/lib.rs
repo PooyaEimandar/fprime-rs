@@ -7,6 +7,7 @@
 //! test in `Rust/test/ut/` which runs both codecs over the same values.
 #![cfg_attr(not(test), no_std)]
 
+pub mod fpp_string;
 pub mod fw_buffer;
 pub mod raw_time;
 pub mod strings;
