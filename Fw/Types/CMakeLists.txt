@@ -42,6 +42,22 @@ register_fprime_module(
     Fw_StringScan
 )
 
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_TYPES)
+    # The kernel shim *is* the implementation of Serializable.cpp, so it must
+    # fault as Serializable.cpp. Every other shim in the port does this --
+    # Fw/Time, StringUtils below, Os/Posix/RawTime -- and the kernel, which
+    # came first, was the one that did not. Recompute ASSERT_FILE_ID and
+    # ASSERT_RELATIVE_PATH from the original's path, as cmake/utilities.cmake
+    # set_assert_flags does.
+    string(REPLACE "${FPRIME_FRAMEWORK_PATH}/" "" FPRIME_SERIALIZABLE_SHORT_SRC
+           "${CMAKE_CURRENT_LIST_DIR}/Serializable.cpp")
+    string(MD5 FPRIME_SERIALIZABLE_HASH "${FPRIME_SERIALIZABLE_SHORT_SRC}")
+    string(SUBSTRING "${FPRIME_SERIALIZABLE_HASH}" 0 8 FPRIME_SERIALIZABLE_FILE_ID)
+    set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/SerializableRust.cpp" PROPERTIES
+        COMPILE_FLAGS
+        "-DASSERT_FILE_ID=0x${FPRIME_SERIALIZABLE_FILE_ID} -DASSERT_RELATIVE_PATH='\"${FPRIME_SERIALIZABLE_SHORT_SRC}\"'")
+endif()
+
 if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_FW_TYPES AND NOT FPRIME_IS_SUB_BUILD)
     # Fw_Types and the Rust staticlib are mutually dependent: the kernel calls
     # into Rust, and the Rust panic hook calls FW_ASSERT back. Declaring the

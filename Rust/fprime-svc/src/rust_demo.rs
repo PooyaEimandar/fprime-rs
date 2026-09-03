@@ -12,6 +12,7 @@
 //! interop design.
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use fprime_config::FwOpcodeType;
 
 use crate::generated::rust_demo_glue::{cmd_response, Buffer, Env, RustDemoHandlers};
 
@@ -115,7 +116,7 @@ impl RustDemoHandlers for RustDemo {
         data.context = consumed as u32;
     }
 
-    fn cmd_set_total(&self, env: &Env, opcode: u32, cmd_seq: u32, value: u32) {
+    fn cmd_set_total(&self, env: &Env, opcode: FwOpcodeType, cmd_seq: u32, value: u32) {
         // A command is the one place Rust decides a status the framework
         // acts on, so the validation and the response both live here.
         if value > MAX_SETTABLE_TOTAL {

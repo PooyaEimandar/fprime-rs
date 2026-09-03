@@ -1786,7 +1786,11 @@ def cpp_epilogue(param):
             f"    {name}.setContext(rs_{name}.context);",
         ]
     if param.by_ref and desc[0] == "enum":
-        return [f"    {name} = static_cast<{desc[3]}::T>(rs_{name});"]
+        # Constructed from the enum's SerialType rather than cast to its raw
+        # `T`: Rust can hand back any integer, and a cast straight to a plain
+        # enum is undefined behaviour for a value outside its range. The
+        # generated class's SerialType constructor asserts validity first.
+        return [f"    {name} = {desc[3]}(static_cast<{desc[3]}::SerialType>(rs_{name}));"]
     return []
 
 
@@ -1845,7 +1849,7 @@ def generate_component_rust(
     ]
     if any(p.desc[0] == "buffer" for port in ports for p in port.params):
         out += [
-            "use fprime_config::FwSizeType;",
+            "use fprime_config::{FwOpcodeType, FwSizeType};",
             "",
             "/// An `Fw::Buffer` as it crosses the boundary: the triple the C++",
             "/// object really is. A `ref` parameter's `size` and `context` are",
@@ -1901,7 +1905,7 @@ def generate_component_rust(
         out.append("    /// the dispatcher is waiting on it.")
         out.append(
             f"    fn cmd_{snake(command.name)}"
-            f"(&self, env: &Env, opcode: u32, cmd_seq: u32{args});"
+            f"(&self, env: &Env, opcode: FwOpcodeType, cmd_seq: u32{args});"
         )
     out.append("}")
     if has_env:
@@ -2035,7 +2039,7 @@ def generate_component_rust(
             "/// must point to a live Env for the calling instance.",
             "#[no_mangle]",
             f'pub unsafe extern "C" fn {prefix}_cmd_{command.name}('
-            "handlers: *const c_void, env: *const Env, opcode: u32, "
+            "handlers: *const c_void, env: *const Env, opcode: FwOpcodeType, "
             f"cmd_seq: u32{c_args}) {{",
             "    // SAFETY: forwarded unchanged from the shim.",
             "    if let Some(handlers) = unsafe { handlers_from(handlers) } {",
@@ -2095,7 +2099,8 @@ def generate_env_rust(events, channels=(), commands=()):
             "    /// Answer a command. Every command handler must call this",
             "    /// exactly once: the dispatcher is waiting on it.",
             "    pub cmd_response: ",
-            '        Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32)>,',
+            "        Option<unsafe extern \"C\" fn(*mut c_void, "
+            "FwOpcodeType, u32, u32)>,",
         ]
     out += (
         [
@@ -2150,7 +2155,7 @@ def generate_env_rust(events, channels=(), commands=()):
     if commands:
         out += [
             "    /// Answer a command, with one of the `cmd_response` constants.",
-            "    pub fn respond(&self, opcode: u32, cmd_seq: u32, response: u32) {",
+            "    pub fn respond(&self, opcode: FwOpcodeType, cmd_seq: u32, response: u32) {",
             "        if let Some(respond) = self.cmd_response {",
             "            // SAFETY: as above.",
             "            unsafe { respond(self.component, opcode, cmd_seq, response) };",
@@ -2279,7 +2284,15 @@ def env_construction(component, events, channels, commands, prefix):
             "                          uint32_t cmdSeq, uint32_t response) {",
             f"        static_cast<{component}*>(component)->cmdResponse_out(",
             "            static_cast<FwOpcodeType>(opcode), cmdSeq,",
-            "            Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));",
+            # SerialType, not T. The generated enum has two constructors: the
+            # one taking `enum T` asserts AFTER the caller has already cast,
+            # and casting an out-of-range value to a plain enum is undefined
+            # behaviour -- the same defect Fw::ComPacket carried for uplinked
+            # descriptors. The SerialType overload asserts on the integer
+            # first, so a Rust handler that answers with a nonsense response
+            # faults cleanly instead.
+            "            Fw::CmdResponse("
+            "static_cast<Fw::CmdResponse::SerialType>(response)));",
             "    };",
         ]
     return out

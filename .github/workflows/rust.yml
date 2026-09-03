@@ -148,7 +148,17 @@ jobs:
         # which made "cargo-only" untestable. Assert it stays that way.
         run: |
           cargo run -p fprime-selftest
-          if ldd target/debug/fprime-selftest | grep -Ei "libstdc\+\+|libc\+\+"; then
+          # `if ldd ... | grep`, as this was first written, tests grep's exit
+          # status: an ldd that fails outright, or prints "not a dynamic
+          # executable", yields no match and the check reports success. A
+          # check that cannot fail is worse than no check, so ldd's own status
+          # is captured first.
+          if ! links="$(ldd target/debug/fprime-selftest 2>&1)"; then
+            echo "::error::ldd failed, so the link could not be inspected:" >&2
+            printf '%s\n' "$links" >&2
+            exit 1
+          fi
+          if printf '%s' "$links" | grep -Ei "libstdc\+\+|libc\+\+"; then
             echo "::error::the cargo-only binary linked a C++ runtime"
             exit 1
           fi

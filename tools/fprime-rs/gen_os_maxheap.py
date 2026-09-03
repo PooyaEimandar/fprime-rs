@@ -40,7 +40,7 @@ BANNER = """\
 //
 // Selected instead of MaxHeap.cpp via FPRIME_RUST_IMPL_OS_MAXHEAP; the oracle
 // is the existing Types_Max_Heap_test rules-based suite plus the
-// PriorityQueue, PriorityMemQueue and LocklessPriorityQueue suites that run on
+// PriorityQueue suite that runs on
 // top of it.
 //
 // GENERATED from Os/Generic/Types/MaxHeap.cpp by

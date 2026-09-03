@@ -1,8 +1,12 @@
 //! The stable max-heap behind the OSAL priority queue.
 //!
 //! Mirrors `Os/Generic/Types/MaxHeap.cpp`, which is the ordering core of
-//! `Os::Generic::PriorityQueue` and `PriorityMemQueue` — every message a
-//! deployment queues to an active component is ordered by this code.
+//! `Os::Generic::PriorityQueue` — every message a deployment queues to an
+//! active component through that queue is ordered by this code.
+//!
+//! It is the only consumer. `PriorityMemQueue` and `LocklessPriorityQueue`
+//! are built on `Types::AtomicQueue` and never touch the heap; earlier
+//! versions of this comment claimed all three.
 //!
 //! Two properties define it, and both are preserved here exactly:
 //!
@@ -78,7 +82,11 @@ impl MaxHeap<'_> {
         let mut i = 0;
         while i < max_iter && index != 0 {
             let parent = (index - 1) / 2;
-            debug_assert!(parent < index, "max-heap parent index must move up");
+            // assert!, not debug_assert!: Os/Generic/Types/MaxHeap.cpp:87 is an
+            // unconditional FW_ASSERT, and this port's rule is that guards stay.
+            // [profile.release] does not enable debug assertions, so a
+            // debug_assert! here is simply absent from every shipped build.
+            assert!(parent < index, "max-heap parent index must move up");
             if value <= self.nodes[parent].value {
                 break;
             }
@@ -87,6 +95,10 @@ impl MaxHeap<'_> {
             i += 1;
         }
         assert!(i < max_iter, "max-heap push exceeded its iteration bound");
+        // The second post-loop guard the C++ carries (MaxHeap.cpp:101), which
+        // this mirror had dropped. It catches a sift-up that walked past the
+        // end of the live region -- a bit flip, or a corrupted size.
+        assert!(index <= self.len(), "max-heap push landed outside the heap");
 
         self.nodes[index] = Node {
             value,

@@ -59,7 +59,9 @@ fn add_word_unaligned(value: &mut u32, word: &[u8], position: u8) {
 }
 
 fn add_byte_at_offset(value: &mut u32, byte: u8, offset: u8) {
-    debug_assert!(offset < 4);
+    // assert!, not debug_assert!: CFDP/Checksum/Checksum.cpp:96 is an
+    // unconditional FW_ASSERT, and release builds compile a debug_assert! out.
+    assert!(offset < 4);
     let addend = (byte as u32) << (8 * (3 - offset as u32));
     *value = value.wrapping_add(addend);
 }

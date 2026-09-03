@@ -31,8 +31,9 @@ void RustDemo ::addIn_handler(FwIndexType portNum, uint32_t value) {
     };
     env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
     env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
-        static_cast<RustDemo*>(component)->cmdResponse_out(static_cast<FwOpcodeType>(opcode), cmdSeq,
-                                                           Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
     };
     fprime_rs_rustdemo_addIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env, value);
 }
@@ -46,8 +47,9 @@ void RustDemo ::consumeIn_handler(FwIndexType portNum, Fw::Buffer& data) {
     };
     env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
     env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
-        static_cast<RustDemo*>(component)->cmdResponse_out(static_cast<FwOpcodeType>(opcode), cmdSeq,
-                                                           Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
     };
     fprime_rs_rustdemo_consumeIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env, &rs_data);
     data.setSize(rs_data.size);
@@ -62,8 +64,9 @@ uint32_t RustDemo ::queryIn_handler(FwIndexType portNum, const RustDemoKind& kin
     };
     env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
     env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
-        static_cast<RustDemo*>(component)->cmdResponse_out(static_cast<FwOpcodeType>(opcode), cmdSeq,
-                                                           Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
     };
     return fprime_rs_rustdemo_queryIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env,
                                       static_cast<uint8_t>(kind.e));
@@ -77,8 +80,9 @@ void RustDemo ::resetIn_handler(FwIndexType portNum, uint32_t seed, bool enabled
     };
     env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
     env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
-        static_cast<RustDemo*>(component)->cmdResponse_out(static_cast<FwOpcodeType>(opcode), cmdSeq,
-                                                           Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
     };
     fprime_rs_rustdemo_resetIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env, seed, enabled);
 }
@@ -91,8 +95,9 @@ void RustDemo ::scaleIn_handler(FwIndexType portNum, uint32_t& value) {
     };
     env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
     env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
-        static_cast<RustDemo*>(component)->cmdResponse_out(static_cast<FwOpcodeType>(opcode), cmdSeq,
-                                                           Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
     };
     fprime_rs_rustdemo_scaleIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env, &value);
 }
@@ -105,8 +110,9 @@ void RustDemo ::SET_TOTAL_cmdHandler(FwOpcodeType opCode, U32 cmdSeq, uint32_t v
     };
     env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
     env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
-        static_cast<RustDemo*>(component)->cmdResponse_out(static_cast<FwOpcodeType>(opcode), cmdSeq,
-                                                           Fw::CmdResponse(static_cast<Fw::CmdResponse::T>(response)));
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
     };
     fprime_rs_rustdemo_cmd_SET_TOTAL(this->m_rustHandlers, &env, static_cast<uint32_t>(opCode), cmdSeq, value);
 }

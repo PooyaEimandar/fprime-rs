@@ -50,7 +50,7 @@ mixed C++/Rust deployments working at every step.
       differential test:** arrays, floats, 64-bit members, member arrays and
       structs-of-structs. The generator emits all of them, but nothing pins
       them: there is **no test of `fpp_to_rust.py` at all** (the only generator
-      test in the tree, `test_shimgen.py`, covers the three shim generators),
+      test in the tree, `test_shimgen.py`, covers the shim generators),
       and no checked-in generated module contains an array, a float or a
       64-bit member. The primitive codec underneath *is* differentially pinned
       for U64/I64/F32/F64 — the gap is generated *types* carrying them.
@@ -117,16 +117,28 @@ mixed C++/Rust deployments working at every step.
       no per-component C++ at all" — is **not** met: the generated shim and a
       hand-written component header are still per-component C++, and the
       autocoded C++ base still owns ports, threading and all framework
-      plumbing. Nothing of the dispatch loop, queue consumption, or
-      command/telemetry/event/parameter handling moved to Rust. The generator
-      accepts only input ports whose parameters are primitives or bools passed
-      by value with no return type, and refuses everything else by name —
-      which means essentially no existing framework component qualifies today
-      (they carry `Fw::Buffer`, user types and `ref` parameters), and the
-      demonstration component was written to fit those limits. The
+      plumbing. Nothing of the dispatch loop or queue consumption moved to
+      Rust.
+
+      *(The rest of this paragraph as first written has been overtaken and is
+      corrected here rather than left standing, because the roadmap is the
+      project's memory. It said command, telemetry, event and parameter
+      handling had not moved, and that the generator accepted only primitives
+      and bools by value with no return type. Phases 12 and 13 changed three
+      of those: events, telemetry and command responses cross today, and the
+      generator carries `ref` parameters, `Fw::Buffer` and FPP enums, and
+      return values. **Parameters remain the one that did not** — no
+      `ParamBuffer`, no `parameter` specifier support. The claim that
+      "essentially no existing framework component qualifies" is also no
+      longer true: running the generator's own port collection over all 75
+      `Fw`/`Svc`/`Drv` components accepts ten of them.)* The
       hand-written shims from Phases 2, 3 and 5 were **not** retrofitted onto
       the generator
-- [~] **Phase 8 — partial: the serialization kernel flips.** The interop
+- [x] **Phase 8 — closed as superseded.** The kernel flipped and works; what
+      was left open — "types and buffers as canonical Rust" — was retired by
+      Phase 14, on evidence this phase itself produced: once the kernel's
+      primitives run in Rust, the layer above them is not a porting candidate.
+      **Partial: the serialization kernel flips.** The interop
       direction reverses for the first time. Through Phases 1–7 Rust
       reimplemented logic that C++ called into at the edges; here C++'s own
       `Fw::LinearBufferBase` — the primitive read/write path underneath every
@@ -147,8 +159,16 @@ mixed C++/Rust deployments working at every step.
       `copyRaw`/`copyRawOffset` — 20 cases covering each status on each path,
       the exact-fit and one-past boundaries, and what a refused transfer
       leaves behind. It uses only the public `Fw` API, so it passes against
-      either implementation and CI runs it in both switch positions: a
-      differential oracle rather than a test of the Rust alone.
+      either implementation.
+
+      *(As first written this said CI runs it in both switch positions, "a
+      differential oracle rather than a test of the Rust alone". That is not
+      what the workflow does: there is one UT cache and it is generated with
+      `FPRIME_RUST_IMPL_FW_TYPES=ON`, while the OFF-position step only
+      **builds** the displaced C++ and never runs a test. The test genuinely
+      is implementation-independent — it uses only the public `Fw` API — but
+      the differential claim needed a second cache that does not exist, so it
+      was an intention rather than a fact.)*
 
       `Rust/fprime-core`'s `Cursor` owns the scalar work and
       `plan_bulk_read`/`plan_bulk_write` the bulk bounds decisions — in safe,
@@ -192,7 +212,7 @@ mixed C++/Rust deployments working at every step.
       tree, it only ever exercises the *pass* path — which would make a check
       that had silently stopped catching anything look healthy.
       `tools/fprime-rs/test_shimgen.py` closes that: it mutates copies and
-      asserts the verdict for 14 cases across the three generators, including
+      asserts the verdict for 25 cases across the six shim generators, including
       a `..` that escapes the sandbox root and an inverted heap tie-break. It
       runs in CI. `--check` itself runs unconditionally in the Rust job and
       again on every build that enables a shim.
@@ -255,7 +275,9 @@ mixed C++/Rust deployments working at every step.
       job) and every external project consuming F´ via `find_package` silently
       build the original C++ kernel, so the exit criterion is unverified
       outside framework-root builds on a machine with cargo
-- [~] **Phase 9 — partial: `Os/Generic` and path safety in Rust.** Two OSAL
+- [x] **Phase 9 — done.** Two guards it had dropped are restored (see the
+      correction at the end of this entry); with those, everything the phase
+      set out to move has moved. **Partial: `Os/Generic` and path safety in Rust.** Two OSAL
       pieces move, chosen because they are algorithm rather than syscall:
 
       - **`Types::MaxHeap`** (`Os/Generic/Types/`, 260 → 126 lines) — the
@@ -275,13 +297,35 @@ mixed C++/Rust deployments working at every step.
         its substance is a `getWorkingDirectory` syscall.
 
       Both are generated by the same mechanism as Phase 8's kernel
-      (`tools/fprime-rs/shimgen.py`, now shared by three generators), with the
+      (`tools/fprime-rs/shimgen.py`, now shared by six generators), with the
       same content-not-formatting drift check and upstream-body fingerprints —
       including for the helper functions each generator *removes*, which for
       these two shims are the very functions the Rust reimplements.
-      Their oracles are the existing suites: `Types_Max_Heap_test` (rules-based
-      via STest), `Os_FilePathUtils_Test` (24 cases), `Os_SandboxedFile_Test`,
-      and the three priority-queue suites that run on top of the heap.
+      Their oracles are the existing suites: `Types_Max_Heap_test`,
+      `Os_FilePathUtils_Test` (24 cases), `Os_SandboxedFile_Test`, and the
+      priority-queue suite that runs on top of the heap.
+
+      *(Two corrections to that sentence as first written. `Types_Max_Heap_test`
+      is **not** rules-based via STest — it is three plain gtest cases over
+      hand-written arrays at one depth, which is a weaker oracle than the
+      phase claimed and is why the Rust carries its own property tests. And
+      only **one** downstream suite runs on the heap, not three:
+      `PriorityMemQueue` and `LocklessPriorityQueue` are built on
+      `Types::AtomicQueue` and never touch it. The same wrong list had been
+      copied into two shipped code comments — `max_heap.rs` and the generated
+      `MaxHeapRust.cpp` — and is corrected there too.)*
+
+      **Correction: two guards this phase dropped, since restored.** The port's
+      rule is that `FW_ASSERT`s stay in C++ or come across as `assert!`. The
+      heap mirror had `debug_assert!(parent < index)` where
+      `Os/Generic/Types/MaxHeap.cpp:87` is unconditional, and had dropped
+      `MaxHeap.cpp:101`'s `index <= m_size` check entirely. `[profile.release]`
+      does not enable debug assertions, so the first was **absent from every
+      shipped build** rather than merely weaker. The same slip was in
+      `CFDP/Checksum`'s mirror, against `Checksum.cpp:96`. All three are
+      `assert!` now, which routes through the panic hook into `FW_ASSERT`. It
+      is worth recording rather than quietly fixing: the phase's own headline
+      was that guards do not move, and three had.
 
       **What was deliberately not ported, and why.** Everything in
       `Os/Posix`, `Os/Darwin` and `Os/Linux` is a thin libc/pthread wrapper —
@@ -312,13 +356,22 @@ mixed C++/Rust deployments working at every step.
       The blocker is not the primitives-only parameter rule; it is that the
       generated glue is a **one-way sink**. Rust cannot call an output port,
       emit an event or telemetry, read a parameter, or answer a command.
+
+      *(Written during Phase 9 and since overtaken: Phase 13 delivered events,
+      telemetry and command responses, so three of those five now work. Output
+      ports and parameters are still the two that do not, and output ports are
+      the reason `Svc::ApidManager` remains unwired — see Phase 10.)*
       Ordered by how many components each unblocks, the generator needs:
       output-port callbacks (a vtable of `extern "C"` thunks passed alongside
       the instance pointer), then return values across the FFI (which alone
       unblocks `Svc::ApidManager` — 156 lines of pure enum/integer table
       lookup with 272 lines of tests, the best available proving ground), then
       `ref` parameters for serializable types
-- [~] **Phase 10 — partial, and the goal as stated is not reachable.** The
+- [x] **Phase 10 — closed as superseded, not achieved.** The exit criterion —
+      a cargo-only deployment — was re-issued verbatim as Phase 20, and every
+      blocker this entry names is now owned by Phases 12, 13 and 16–19.
+      Keeping it open would have meant two roadmap entries competing for one
+      goal. **Partial, and the goal as stated is not reachable.** The
       exit criterion was a cargo-only deployment: no fpp-to-cpp, no C++
       objects. Measured against `TestDeploymentsProject/Ref`'s actual link
       line, that means replacing **261,923 lines of C++** (398 sources,
@@ -327,7 +380,7 @@ mixed C++/Rust deployments working at every step.
       classes** — the dispatch loops, queue consumption, and
       command/telemetry/event/parameter machinery — and *nothing in this tree
       generates any of it*. `RefTopologyAc.cpp` alone is 15,530 lines from a
-      582-line model. The whole Rust workspace is ~5,600 lines, `no_std`, with
+      582-line model. The whole Rust workspace is ~7,900 lines, `no_std`, with
       no threads, no allocator and no OSAL. This phase is not one more
       increment; it is a component runtime plus three generators.
 
@@ -378,9 +431,12 @@ mixed C++/Rust deployments working at every step.
       **What still blocks a real component**, beyond the runtime: the handler
       pointer needs somewhere to live, and an upstream component has no such
       member — wiring `ApidManager` would mean editing its header, which is
-      upstream surgery this phase did not do. Ports carrying `Fw::Buffer`,
-      structs or arrays are still refused, as are commands, telemetry and
-      parameters.
+      upstream surgery this phase did not do. Ports carrying structs or arrays
+      are still refused, as are parameters.
+
+      *(As first written this also listed `Fw::Buffer`, commands and
+      telemetry. Phases 12 and 13 delivered all three; only structs, arrays
+      and parameters remain refused.)*
 
       **What Phase 10 was, and what happens to it.** The goal — a cargo-only
       deployment — was never a tenth step of the same size as the nine before
@@ -448,9 +504,17 @@ Phases 1–9 verifiable and Phase 10 not.
       originals.
 
 - [~] **Phase 12 — partial: the two port shapes that matter most.** Counted
-      across `Fw`, `Svc` and `Drv`, the framework's port definitions have 79
-      parameters. **20 are `ref`** and **10 are `Fw.Buffer`** — the two largest
-      groups after primitives, and the generator now carries both.
+      across `Fw`, `Svc` and `Drv`, the framework's port definitions have
+      **126 parameters across 67 ports. 48 are `ref`** and **25 are
+      `Fw.Buffer`** — the two largest groups after primitives, and the
+      generator carries both.
+
+      *(These numbers replace 79 / 20 / 10, which were wrong in the same way
+      each time: FPP separates port parameters by newline, not by comma, so a
+      comma-split undercounted every multi-parameter port. The proportions
+      survive the correction — `ref` and `Fw.Buffer` are still the two shapes
+      that matter — but the absolute figures roughly doubled, and the share of
+      parameters this phase's work covers is larger, not smaller.)*
 
       A `ref` parameter crosses as a pointer and the handler takes `&mut T`,
       so what Rust writes is what the caller sees. `Fw::Buffer` cannot cross
@@ -468,7 +532,15 @@ Phases 1–9 verifiable and Phase 10 not.
       header. That is the remaining blocker for using any of this outside the
       demo component.
 
-- [~] **Phase 13 — partial: commands and telemetry, not parameters.** A
+- [x] **Phase 13 — closed as superseded.** Commands, telemetry and events all
+      cross. Its unmet exit criterion — one real in-tree component running on
+      the generated glue — turns out to be blocked on something this phase
+      never named: a Rust handler cannot call an **output port**. Of the ten
+      framework components with both a command and a channel, eight need
+      output-port calls, one is refused by type, and the tenth has a suite
+      that asserts channel counts and never values, so passing it would prove
+      nothing. That criterion is re-issued below as its own item rather than
+      left hanging here. **Partial: commands and telemetry, not parameters.** A
       command was what made a generated shim *abstract*: the autocoded base
       leaves `<NAME>_cmdHandler` pure virtual, so a component with a command
       could not be generated at all. Rust now implements it, and answers the
@@ -947,8 +1019,11 @@ Phases 1–9 verifiable and Phase 10 not.
       the order its types appear — the deterministic-emission fix below. The
       rest are byte-identical.
 
-- [~] **Phase 15 — started: `Os::RawTime`'s interval arithmetic.** *(weeks
-      remaining)*. The goal is `Os::File`, `FileSystem`, `Directory`, `Task`,
+- [x] **Phase 15 — closed: the OSAL is the wrong shape for a body-by-body
+      port.** One slice landed, `Os::RawTime`'s interval arithmetic, and
+      then a subsystem-by-subsystem accounting said stop. The verdict and
+      that accounting are at the end of this entry; read them before the
+      narrative. *(originally sized in weeks.)* The goal was `Os::File`, `FileSystem`, `Directory`, `Task`,
       `Mutex`, `Queue` and `RawTime` in Rust behind the existing delegate
       interfaces. **Exit:** a deployment runs with the Rust OSAL selected.
       **Oracle:** the `Os` suites, which are already
@@ -1094,11 +1169,51 @@ Phases 1–9 verifiable and Phase 10 not.
       So Phase 15 as originally stated — "a deployment runs with the Rust
       OSAL selected" — is not reachable by porting the Posix implementation
       body by body, and pretending otherwise would repeat Phase 14's mistake
-      one layer down. The honest reframing is that a Rust OSAL is worth
-      writing as a *new implementation for a target that needs one*, where the
-      handle budget is set alongside it, rather than as a re-implementation of
-      a Posix layer that is already thin. Recorded here rather than acted on:
-      that is a project decision, not a refactor.
+      one layer down.
+
+      **Verdict: closed. Every Os subsystem was examined; one was worth
+      taking.** The accounting below is recorded in full so that nobody has to
+      redo it, and so that a future reader can disagree with a specific line
+      rather than with a conclusion.
+
+      | subsystem | why it did not move |
+      | --- | --- |
+      | `RawTime` | **ported** — the interval arithmetic, the only body in the OSAL with no syscall in it |
+      | `File` | CRC delegates to `Utils::Hash`, Rust since Phase 1; `seek_absolute`'s only interesting branch is unreachable on a 64-bit host; `readline` leaves ~10 lines once guards, I/O and seeks stay |
+      | `FileSystem` | one real algorithm, `copyFileData` (~25 lines), whose loop never iterates twice under test — files are 1–4 bytes against a 512-byte chunk — and no test asserts a non-`OP_OK` status |
+      | `Directory` | ~15 movable lines behind three FFI calls; 16/16 handle |
+      | `Task` | the only flight-critical semantics in the set, and the suite never passes a non-default priority or stack size, so the oracle is blind on exactly the movable code |
+      | `Mutex`, `Condition` | four lines of decision logic total; 72/72 and 56/56 handles; the hottest lock path in the system |
+      | `Queue` (`PriorityMemQueue`) | 809 lines, but 34 atomics and memory-ordering comments — concurrency, not arithmetic. `validateQueueConfigs` looks pure and is *entirely* `FW_ASSERT`s: the function **is** the guards |
+      | `Queue` (`PriorityQueue`) | the slot allocator is ~5 lines of ring arithmetic plus two `memcpy` offsets; `MaxHeap`, the part with content, has been Rust since Phase 9 |
+      | `Console`, `Cpu`, `Memory`, `CountingSemaphore` | small and platform-specific: `/proc` reads, `sysctl`, POSIX semaphores |
+      | `IntervalTimer` | pure delegation to `RawTime`, so already covered transitively by the one slice that landed |
+
+      Two candidates were deliberately declined rather than taken, and the
+      reason is the same in both cases: `Os::Generic`'s `findMSB` and
+      `PriorityQueue`'s slot allocator are each about five lines of pure
+      arithmetic sitting in the queue's hot path. Taking them would have made
+      the phase look larger while adding a boundary that verifies nothing —
+      the trade the `Mutex` measurement argues against. Closing a phase with
+      one honest slice is better than closing it with three padded ones.
+
+      **The honest reframing**, recorded rather than acted on because it is a
+      project decision and not a refactor: a Rust OSAL is worth writing as a
+      *new implementation for a target that needs one*, with the handle budget
+      set alongside it — not as a re-implementation of a Posix layer that is
+      already thin. Every one of the seven delegates except `RawTime` sits
+      exactly on its `FW_*_HANDLE_MAX_SIZE`, so a Rust delegate that owns any
+      state does not fit without a `PlatformCfg` change that ripples into
+      every downstream deployment. That is the constraint to design around,
+      and it is a design question, not a porting one.
+
+      **What the phase did produce**, beyond the slice: the
+      `FPRIME_OS_SOURCE_<Name>` hook in `Os/CMakeLists.txt`, which any later
+      OSAL work will need because `register_os_implementation` derives its
+      sources from module names and has no `SOURCES` list to swap; nine tests
+      for `Os::File`'s `readline`, which had none and one Linux-only caller;
+      and the measured handle-size table above, which is the fact that decides
+      the shape of any future attempt.
 
 - [ ] **Phase 16 — The component runtime** *(months — this is the project)*.
       A Rust-native equivalent of `ActiveComponentBase`/`QueuedComponentBase`:

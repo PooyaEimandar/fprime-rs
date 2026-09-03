@@ -11,7 +11,7 @@
 
 use core::ffi::c_void;
 
-use fprime_config::FwSizeType;
+use fprime_config::{FwOpcodeType, FwSizeType};
 
 /// An `Fw::Buffer` as it crosses the boundary: the triple the C++
 /// object really is. A `ref` parameter's `size` and `context` are
@@ -64,7 +64,7 @@ pub trait RustDemoHandlers: Sync {
     ///
     /// Must answer exactly once with `env.respond(...)`:
     /// the dispatcher is waiting on it.
-    fn cmd_set_total(&self, env: &Env, opcode: u32, cmd_seq: u32, value: u32);
+    fn cmd_set_total(&self, env: &Env, opcode: FwOpcodeType, cmd_seq: u32, value: u32);
 }
 
 /// Callbacks into the component instance, for what Rust cannot own.
@@ -81,7 +81,7 @@ pub struct Env {
     pub tlm_total: Option<unsafe extern "C" fn(*mut c_void, u32)>,
     /// Answer a command. Every command handler must call this
     /// exactly once: the dispatcher is waiting on it.
-    pub cmd_response: Option<unsafe extern "C" fn(*mut c_void, u32, u32, u32)>,
+    pub cmd_response: Option<unsafe extern "C" fn(*mut c_void, FwOpcodeType, u32, u32)>,
 }
 
 /// The command responses the dispatcher understands.
@@ -118,7 +118,7 @@ impl Env {
         }
     }
     /// Answer a command, with one of the `cmd_response` constants.
-    pub fn respond(&self, opcode: u32, cmd_seq: u32, response: u32) {
+    pub fn respond(&self, opcode: FwOpcodeType, cmd_seq: u32, response: u32) {
         if let Some(respond) = self.cmd_response {
             // SAFETY: as above.
             unsafe { respond(self.component, opcode, cmd_seq, response) };
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn fprime_rs_rustdemo_scaleIn(
 pub unsafe extern "C" fn fprime_rs_rustdemo_cmd_SET_TOTAL(
     handlers: *const c_void,
     env: *const Env,
-    opcode: u32,
+    opcode: FwOpcodeType,
     cmd_seq: u32,
     value: u32,
 ) {
