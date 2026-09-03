@@ -10,6 +10,7 @@
 pub mod fpp_string;
 pub mod fw_buffer;
 pub mod raw_time;
+pub mod serial_buffer;
 pub mod strings;
 pub mod time;
 

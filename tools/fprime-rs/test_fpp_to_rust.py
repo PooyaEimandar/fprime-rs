@@ -536,6 +536,80 @@ def an_array_default_named_by_a_constant_is_not_broadcast():
     assert "MRow([3, 4])" in rendered
 
 
+@case
+def a_serial_buffer_abstract_type_takes_its_capacity_from_a_constant():
+    """`Fw.LogBuffer` and friends are abstract, but their capacity is not.
+
+    Six FPP abstract types are all one shape -- an Fw::LinearBufferBase
+    subclass, a length token plus up to N bytes -- and each one's N is an FPP
+    constant. So unlike Fw::Buffer, whose size depends on a C++-only pointer
+    type, these ARE resolvable from the model.
+    """
+    model = build(
+        """
+        type FwSizeStoreType = U16
+        constant FW_LOG_BUFFER_MAX_SIZE = 506
+        module Fw {
+          type LogBuffer
+        }
+        module M {
+          struct Holder {
+            payload: Fw.LogBuffer
+          }
+        }
+        """
+    )
+    fields = next(f for _, name, f, _ in model.structs if name == "Holder")
+    kind, rust, _ = next(desc for n, desc, _ in fields if n == "payload")
+    assert kind == "mirror", kind
+    assert rust == "FwSerialBuffer<506>", rust
+    rendered = G.generate(model, "m")
+    # Type position keeps the plain form; expression position needs a
+    # turbofish, and getting that wrong is a syntax error in the output.
+    assert "pub payload: FwSerialBuffer<506>" in rendered, rendered[:600]
+    assert "FwSerialBuffer::<506>::default()" in rendered
+    assert "FwSerialBuffer::<506>::SERIALIZED_SIZE" in rendered
+
+
+@case
+def a_missing_capacity_constant_is_refused_by_name():
+    try:
+        build(
+            """
+            type FwSizeStoreType = U16
+            module Fw {
+              type LogBuffer
+            }
+            module M {
+              struct Holder {
+                payload: Fw.LogBuffer
+              }
+            }
+            """
+        )
+    except G.GeneratorError as exc:
+        assert "FW_LOG_BUFFER_MAX_SIZE" in str(exc), exc
+    else:
+        raise AssertionError("a serial buffer with no capacity constant was accepted")
+
+
+@case
+def a_string_default_is_folded():
+    model = build(
+        """
+        type FwSizeStoreType = U16
+        module M {
+          struct Named {
+            label: string size 8
+            count: U32
+          } default { label = "hi", count = 0 }
+        }
+        """
+    )
+    rendered = G.generate(model, "m")
+    assert 'FwString::<8>::from_bytes(b"hi")' in rendered, rendered[rendered.find("impl Default for MNamed"):][:300]
+
+
 def main():
     # `--require-tools` is what CI passes. Without it a missing fpp-to-json is
     # a skip, which is convenient locally and would be dangerous in CI: a

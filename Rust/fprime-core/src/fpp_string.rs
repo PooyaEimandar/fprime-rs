@@ -71,8 +71,21 @@ impl<const N: usize> FwString<N> {
     }
 
     /// Serialize as a length token followed by the characters.
-    pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, mode: Endianness) -> SerResult {
-        buf.ser_bytes(self.as_bytes(), LengthMode::IncludeLength, mode)
+    ///
+    /// **The `mode` is accepted and ignored, because the C++ ignores it.**
+    /// `ConstStringBase::serializeTo(buffer, maxLength, mode)` takes an
+    /// endianness and then calls `serializeFrom(ptr, len, INCLUDE_LENGTH)`
+    /// without passing it on, so the length token falls back to the
+    /// `Endianness::BIG` default no matter what the caller asked for
+    /// (`Fw/Types/ConstStringBase.cpp:85-89`). The characters themselves are
+    /// bytes and have no endianness.
+    ///
+    /// This is not the same as `FwSerialBuffer`, which passes the mode through
+    /// — `LinearBufferBase::serializeFrom(const LinearBufferBase&, mode)`
+    /// really does honour it (`Fw/Types/Serializable.cpp:288`). The two look
+    /// alike and differ here, which is exactly why it is written down.
+    pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, _mode: Endianness) -> SerResult {
+        buf.ser_bytes(self.as_bytes(), LengthMode::IncludeLength, Endianness::Big)
     }
 
     /// Deserialize a length token and that many characters.
@@ -81,9 +94,11 @@ impl<const N: usize> FwString<N> {
     /// reports: its `deserializeTo` seeds the size estimate with `maxLength()`
     /// and fails when the token exceeds it. On failure the value is left
     /// untouched, mirroring "leave string unmodified" in `StringBase.cpp`.
-    pub fn deserialize_from(buf: &mut DeserReader<'_>, mode: Endianness) -> SerResult<Self> {
+    pub fn deserialize_from(buf: &mut DeserReader<'_>, _mode: Endianness) -> SerResult<Self> {
         let mut bytes = [0; N];
-        let length = buf.deser_bytes(&mut bytes, LengthMode::IncludeLength, mode)?;
+        // Big for the same reason as `serialize_to`: StringBase::deserializeFrom
+        // drops the mode too, reaching deserializeTo's Endianness::BIG default.
+        let length = buf.deser_bytes(&mut bytes, LengthMode::IncludeLength, Endianness::Big)?;
         if length > N {
             return Err(SerError::SizeMismatch);
         }
@@ -154,6 +169,27 @@ mod tests {
             FwString::<4>::deserialize_from(&mut reader, Endianness::Big),
             Err(SerError::SizeMismatch)
         );
+    }
+
+    #[test]
+    fn the_length_token_is_big_endian_whatever_the_caller_asks() {
+        // Fw::ConstStringBase::serializeTo accepts an endianness and does not
+        // pass it on, so the token is always big. Serializing the same string
+        // both ways must produce identical bytes; if this ever fails, the C++
+        // changed and fpp_string.rs must follow.
+        let value = FwString::<8>::from_bytes(b"ab");
+        let mut big = [0u8; 16];
+        let mut little = [0u8; 16];
+        {
+            let mut out = SerBuffer::new(&mut big);
+            value.serialize_to(&mut out, Endianness::Big).unwrap();
+        }
+        {
+            let mut out = SerBuffer::new(&mut little);
+            value.serialize_to(&mut out, Endianness::Little).unwrap();
+        }
+        assert_eq!(big, little);
+        assert_eq!(&big[..2], &[0, 2], "big-endian length token");
     }
 
     #[test]

@@ -238,6 +238,22 @@ ABSTRACT_AS_RUST_TYPE = {
     "Fw.Buffer": ("FwBuffer", "fprime_core::fw_buffer::FwBuffer"),
 }
 
+# Abstract types that are all one shape: an Fw::LinearBufferBase subclass, whose
+# wire form is a FwSizeStoreType length token followed by up to N bytes. The
+# model declares only the name, but each one's capacity IS an FPP constant, so
+# the value is in the model even though the layout is not -- which is what makes
+# these resolvable where Fw::Buffer was not.
+#
+# qualified FPP name -> the FPP constant naming its capacity.
+ABSTRACT_AS_SERIAL_BUFFER = {
+    "Fw.ComBuffer": "FW_COM_BUFFER_MAX_SIZE",
+    "Fw.CmdArgBuffer": "FW_CMD_ARG_BUFFER_MAX_SIZE",
+    "Fw.LogBuffer": "FW_LOG_BUFFER_MAX_SIZE",
+    "Fw.TlmBuffer": "FW_TLM_BUFFER_MAX_SIZE",
+    "Fw.ParamBuffer": "FW_PARAM_BUFFER_MAX_SIZE",
+    "Fw.StatementArgBuffer": "FW_STATEMENT_ARG_BUFFER_MAX_SIZE",
+}
+
 # DefAbsType is collected but never emitted: it contributes a name that other
 # types refer to, and counting it keeps the completeness check below honest.
 DEFINITION_KINDS = ("DefStruct", "DefEnum", "DefArray", "DefAbsType")
@@ -278,6 +294,40 @@ def count_definitions(node):
         for value in node:
             total += count_definitions(value)
     return total
+
+
+def iter_constants(ast, value_map):
+    """Every `constant NAME = ...` in the model, resolved to its value.
+
+    Separate from iter_definitions, which walks type definitions and counts
+    them. Constants are needed by name rather than by node id: an abstract
+    buffer type's capacity is named in ABSTRACT_AS_SERIAL_BUFFER, not pointed
+    at by the typeMap.
+    """
+    constants = {}
+
+    def walk(members):
+        for entry in members:
+            node = entry[1]
+            if not isinstance(node, dict):
+                continue
+            for kind, wrapper in node.items():
+                if kind in SCOPE_KINDS:
+                    data, _ = unwrap(wrapper["node"])
+                    inner = data.get("members")
+                    if not isinstance(inner, list):
+                        inner = opt(inner) or []
+                    walk(inner)
+                elif kind == "DefConstant":
+                    data, _ = unwrap(wrapper["node"])
+                    _, value_id = unwrap(data["value"])
+                    resolved = value_map.get(str(value_id))
+                    if resolved is not None:
+                        constants[data["name"]] = resolved
+
+    for unit in ast:
+        walk(unit["members"])
+    return constants
 
 
 def iter_definitions(ast):
@@ -353,6 +403,23 @@ def resolve_abstract(model, type_map, decl_id):
         rust, use_path = mirror
         model.abs_imports.add(use_path)
         return ("mirror", rust, None)
+    capacity_constant = ABSTRACT_AS_SERIAL_BUFFER.get(qualified)
+    if capacity_constant is not None and model is not None:
+        entry = model.constants.get(capacity_constant)
+        if entry is None:
+            raise GeneratorError(
+                f"abstract type '{qualified}' takes its capacity from the FPP "
+                f"constant '{capacity_constant}', which is not in this model; "
+                f"add the file that defines it to the sources"
+            )
+        kind = next(iter(entry))
+        if kind not in ("Integer", "PrimitiveInt"):
+            raise GeneratorError(
+                f"'{capacity_constant}' resolved to a {kind}, not an integer"
+            )
+        capacity = int(entry[kind]["value"])
+        model.abs_imports.add("fprime_core::serial_buffer::FwSerialBuffer")
+        return ("mirror", f"FwSerialBuffer<{capacity}>", None)
     raise GeneratorError(
         f"abstract type '{qualified}' has no Rust representation. It is "
         f"declared in FPP and implemented in C++, so the model does not say "
@@ -431,6 +498,7 @@ class Model:
         self.abs_alias = {}  # abstract node id -> node id that carries its wire form
         self.struct_fields = {}  # AST node id -> [(name, desc, count)]
         self.array_elements = {}  # AST node id -> (element desc, count)
+        self.constants = {}  # FPP constant name -> resolved value
         self.abs_imports = set()  # `use` paths for hand-written abstract mirrors
 
 
@@ -443,6 +511,7 @@ def build_model(ast, analysis, wanted_modules=None):
     type_map = analysis["typeMap"]
     model = Model()
     model.value_map = analysis.get("valueMap", {})
+    model.constants = iter_constants(ast, model.value_map)
     defs = iter_definitions(ast)
 
     # Register every definition first so named references resolve, and reject
@@ -714,6 +783,23 @@ def fold_value(model, desc, entry, where):
         raise GeneratorError(
             f"{where}: unsupported default value kind '{kind}' for bool"
         )
+    if desc[0] == "string":
+        if kind != "String":
+            raise GeneratorError(
+                f"{where}: unsupported default value kind '{kind}' for a string"
+            )
+        text = body["value"]
+        # Rendered as a byte-string literal: the Rust type holds bytes, and a
+        # non-ASCII default would otherwise silently change length between the
+        # two languages. FPP itself has no escape for one, so refuse rather
+        # than guess.
+        if any(ord(character) > 0x7E or ord(character) < 0x20 for character in text):
+            raise GeneratorError(
+                f"{where}: a string default with non-printable-ASCII characters "
+                f"is not supported"
+            )
+        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        return f'FwString::<{desc[1]}>::from_bytes(b"{escaped}")'
     if desc[0] == "named":
         path, name = model.by_node_id[desc[1]]
         ty = rust_name(path, name)
@@ -783,6 +869,18 @@ def fold_value(model, desc, entry, where):
     raise GeneratorError(f"{where}: cannot fold default for {desc[0]}")
 
 
+def expression_form(rust_type):
+    """A type name as it must be written in expression position.
+
+    `FwSerialBuffer<506>` is fine as a type but is a chained comparison in an
+    expression; Rust wants `FwSerialBuffer::<506>` there. Only the generic
+    mirrors need this, and getting it wrong is a syntax error rather than a
+    silent one, but it is worth doing in one place.
+    """
+    index = rust_type.find("<")
+    return rust_type if index < 0 else rust_type[:index] + "::" + rust_type[index:]
+
+
 def zero_value(model, desc, count):
     """The Rust value a member takes when the model gives it no default."""
     if desc[0] == "prim":
@@ -793,7 +891,7 @@ def zero_value(model, desc, count):
         path, name = model.by_node_id[desc[1]]
         base = f"{rust_name(path, name)}::default()"
     elif desc[0] == "mirror":
-        base = f"{desc[1]}::default()"
+        base = f"{expression_form(desc[1])}::default()"
     elif desc[0] == "string":
         base = f"FwString::<{desc[1]}>::default()"
     else:
@@ -834,7 +932,7 @@ def size_term(model, desc, count):
         path, name = model.by_node_id[desc[1]]
         base = f"{rust_name(path, name)}::SERIALIZED_SIZE"
     elif kind == "mirror":
-        base = f"{desc[1]}::SERIALIZED_SIZE"
+        base = f"{expression_form(desc[1])}::SERIALIZED_SIZE"
     elif kind == "string":
         base = f"FwString::<{desc[1]}>::SERIALIZED_SIZE"
     else:
@@ -863,7 +961,10 @@ def emit_value_deser(model, desc, target, indent):
         path, name = model.by_node_id[desc[1]]
         return f"{pad}{target} = {rust_name(path, name)}::deserialize_from(buf, mode)?;"
     if desc[0] == "mirror":
-        return f"{pad}{target} = {desc[1]}::deserialize_from(buf, mode)?;"
+        return (
+            f"{pad}{target} = "
+            f"{expression_form(desc[1])}::deserialize_from(buf, mode)?;"
+        )
     if desc[0] == "string":
         return f"{pad}{target} = FwString::<{desc[1]}>::deserialize_from(buf, mode)?;"
     raise GeneratorError(f"unsupported deserialize kind: {desc[0]}")

@@ -821,10 +821,9 @@ Phases 1–9 verifiable and Phase 10 not.
 
       Checking it in surfaced two more generator defects, and a survey across
       the whole framework surfaced a third and then drove the rest of the work
-      below. **143 of the 144 modules with an FPP model now generate**, up
-      from 130 when the survey started. The one that does not names its own
-      reason: `Svc/FpySequencer` needs a mirror for the abstract type
-      `Fw.StatementArgBuffer`, the same treatment `Fw.Buffer` already has.
+      below. **All 144 modules with an FPP model now generate**, up from 130
+      when the survey started, and the largest of them — `Svc/FpySequencer`,
+      42 structs — compiles against the real crates.
 
       The third defect is the omission guard paying for itself. Four modules
       failed with "the model holds N type definitions but only N-1 are
@@ -856,7 +855,42 @@ Phases 1–9 verifiable and Phase 10 not.
       rather than as AST nodes — which meant splitting the folder into a
       node-taking half and a value-taking half that can recurse.
 
-      One of those four was a real bug rather than a missing feature. An array
+      **The `Fw::LinearBufferBase` family**, which closed the last gap. Six
+      FPP abstract types — `ComBuffer`, `CmdArgBuffer`, `LogBuffer`,
+      `TlmBuffer`, `ParamBuffer`, `StatementArgBuffer` — are all one shape: a
+      length token plus up to N bytes. Unlike `Fw::Buffer`, whose size depends
+      on a C++-only pointer type, **each one's capacity is an FPP constant**,
+      so these are resolvable from the model even though their layout is not
+      declared in it. `FwSerialBuffer<N>` mirrors them, and the generator
+      resolves N by name from the model's constants.
+
+      It is a separate type from `FwString<N>` on purpose, and the two differ
+      in two behaviours worth stating. `FwString::from_bytes` truncates at the
+      capacity, because a truncated string is still a string and the C++
+      truncates too; `FwSerialBuffer::from_bytes` refuses, because a truncated
+      serialized buffer is a corrupt message — which is also what
+      `LinearBufferBase::serializeFrom` does, answering `NO_ROOM_LEFT` rather
+      than writing a prefix.
+
+      The second difference was a **bug in the first draft of `FwString`**, and
+      it is the kind this port exists to catch. `FwString::serialize_to`
+      passed the caller's endianness through to the length token. The C++ does
+      not: `ConstStringBase::serializeTo(buffer, maxLength, mode)` accepts an
+      endianness and then calls `serializeFrom(ptr, len, INCLUDE_LENGTH)`
+      *without passing it on*, so the token falls back to the
+      `Endianness::BIG` default whatever the caller asked for
+      (`Fw/Types/ConstStringBase.cpp:85-89`, and `StringBase.cpp:125` does the
+      same on the way back). `FwSerialBuffer` is the opposite —
+      `LinearBufferBase::serializeFrom(const LinearBufferBase&, mode)` really
+      does honour it (`Fw/Types/Serializable.cpp:288`). Two types that look
+      alike, disagreeing on exactly one thing, in a direction nothing would
+      have flagged: a little-endian serialization would have produced a
+      byte-swapped length token with an OK status. Both halves are now pinned
+      by tests that assert the two orders are identical for one type and
+      different for the other.
+
+      One of the nested-default four was a real bug rather than a missing
+      feature. An array
       default written as a named constant (`Svc/TlmPacketizer`'s
       `TELEMETRY_SECTION_DEFAULTS`) and a scalar default meant for every
       element are *the same shape in the AST* — a single non-literal node — so
@@ -878,7 +912,7 @@ Phases 1–9 verifiable and Phase 10 not.
       checked-in artifact safe to diff at all.
 
       `tools/fprime-rs/test_fpp_to_rust.py` is the generator's first test
-      suite — 20 cases over the resolution paths above, the omission guard,
+      suite — 23 cases over the resolution paths above, the omission guard,
       the cross-module reference check, emission determinism, both scope
       kinds, sized strings, struct and array defaults, abstract aliasing and
       refusal, and the flattened-name collision check. CI passes
@@ -1053,11 +1087,66 @@ Phases 1–9 verifiable and Phase 10 not.
 - [ ] **Phase 17 — Generate the component bases** *(months)*. Extend
       `fpp_to_rust` to emit what `fpp-to-cpp` emits for a component: the
       117,232 lines of `ComponentAc` across Ref's 41 components. Event
-      emission alone is 28.8% of that (82 generated lines per event), so it
-      is the first target, and telemetry (32 lines each) the second.
-      **Exit:** generated Rust bases for a stated set of components.
-      **Oracle:** behavioral equivalence against the C++ base, component
-      suite by component suite.
+      emission is the roadmap's stated first target. **Exit:** generated Rust
+      bases for a stated set of components. **Oracle:** behavioral equivalence
+      against the C++ base, component suite by component suite.
+
+      **Scoped, not started — and the scoping is the result.** Event emission
+      was surveyed across the whole framework before writing any of it: 482
+      emitter definitions across 50 components in the generated tree. Counted
+      rather than sampled, the numbers are these — `_logBuff.serializeFrom`
+      appears 1,780 times, the capped string form 245 times, and
+      `FW_AMPCS_COMPATIBLE` 1,104 times. Inside the region that builds the
+      buffer there are **no loops, no branches and no early returns**: two
+      fill operations and one preprocessor conditional, for every event in the
+      framework. The space is far smaller and far more uniform than 117,232
+      lines suggests.
+
+      That is the encouraging half. Four findings say do not start yet.
+
+      **There is no seam.** `fpp-to-cpp` is a pinned external dependency
+      (`fprime-fpp==3.3.0`); the repository holds no fork. The buffer is built
+      inside `log_<SEV>_<Name>` in the generated `ComponentAc.cpp`, and there
+      is nowhere a generated Rust builder could be called from. So the slice
+      would produce generator capability plus a proof and would execute in
+      **no flight path at all** — Phase 4's bargain, but for a much smaller
+      prize, and Phase 4 at least had 53,015 lines behind it.
+
+      **The movable core is about 23 lines per event, 29% of the emitter.**
+      The rest is the time get and `logOut_out` (port invocations, blocked on
+      Phase 16), the connectedness guard, the throttle counters, and the
+      text-log path — which needs printf-style formatting into a separate
+      buffer on a separate port, and shares not one byte with the LogBuffer.
+      Of the buffer region itself, 43% sits inside `#if FW_AMPCS_COMPATIBLE`.
+
+      **`FW_AMPCS_COMPATIBLE` is invisible to the generator.** It changes what
+      the buffer contains — an argument count, a per-argument size byte, and
+      for a FATAL event five extra bytes — and it appears in **zero `.fpp`
+      files**. It is a C preprocessor macro in a project-replaceable header
+      (`default/config/FpConfig.h:143`, default `0`), so `fpp-to-json` cannot
+      see it and generated Rust would produce silently wrong bytes under a
+      configuration the build accepts without complaint. That is closable with
+      a `static_assert`, but it has to be closed deliberately, not discovered.
+
+      **Top-level event strings do not serialize the way struct members do.**
+      They use `serializeTo(_logBuff, FW_MIN(FW_LOG_STRING_MAX_SIZE, N))` with
+      `FW_LOG_STRING_MAX_SIZE = 200`, so an argument declared `string size 240`
+      is truncated to 200 on the wire. `FwString<N>::serialize_to` has no cap
+      parameter and would emit up to 40 extra bytes behind a wrong length
+      token, with `FW_SERIALIZE_OK` and a clean build. 245 string
+      serializations across the corpus take this path.
+
+      **The survey earned its keep anyway**, and this is the reason to record
+      it rather than just defer: it found a real bug in `FwString`, shipped
+      hours earlier, where the length token honoured the caller's endianness
+      and the C++ silently does not. See the Phase 14 entry. A slice that is
+      not worth building can still be worth scoping.
+
+      **What would change the answer.** Phase 16. If a Rust runtime owns the
+      component base, the emitter is Rust and the seam question disappears —
+      at which point the uniformity measured above becomes the reason this is
+      tractable rather than a consolation. Until then the honest order is 16
+      before 17, which is the order the roadmap already had.
 
 - [ ] **Phase 18 — A Rust-native deployment** *(weeks, once 16 and 17 land)*.
       Not Ref: a small purpose-built topology — two or three components, a
