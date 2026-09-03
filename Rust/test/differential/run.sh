@@ -6,7 +6,12 @@
 #
 #   fprime-util generate --ut
 #   fprime-util generate --ut --build-cache "$PWD/build-rust-off" -DFPRIME_ENABLE_RUST=OFF
-#   (cd Fw/Types && fprime-util build --ut --build-cache "$PWD/../../build-rust-off")
+#   for d in Fw/Types Svc/FprimeProtocol Svc/ComQueue; do
+#       (cd "$d" && fprime-util build --ut --build-cache "$PWD/../../build-rust-off")
+#   done
+#
+# GeneratedTypesDiff needs the last two: it compares against the autocoded
+# C++ types, which only exist once their modules have been built.
 #
 # then: Rust/test/differential/run.sh
 set -euo pipefail
@@ -42,11 +47,19 @@ for src in "$HERE"/*Diff.cpp; do
     echo "== $name"
     # --coverage because the switch-OFF cache is built with it, and its
     # objects reference the profiling runtime.
+    # Link every library the ON-position build produced, so a test that needs
+    # an autocoded type (Svc/ComQueue, ComCfg, Svc/FprimeProtocol) finds it.
+    EXTRA=""
+    for lib in "$(dirname "$CPP_LIB")"/*.a; do
+        case "$lib" in *libFw_Types.a) continue;; esac
+        EXTRA="$EXTRA $lib"
+    done
+    # shellcheck disable=SC2086
     ${CXX:-c++} -std=c++14 -g -DBUILD_UT -fsanitize=address,undefined --coverage \
         -I"$REPO" -I"$OFF" -I"$OFF/F-Prime" \
         -I"$OFF/cmake/platform/unix/Platform/.." -I"$OFF/F-Prime/default/config/.." \
         "$src" "$REPO/Fw/Types/snprintf_format.cpp" "$REPO/Rust/RustPanicHook.cpp" \
         -o "$OUT/$name" \
-        "$CPP_LIB" "$RUST_LIB" "$LOGGER" "$OS_LIB"
+        "$CPP_LIB" "$RUST_LIB" $EXTRA "$LOGGER" "$OS_LIB" "$CPP_LIB"
     (cd "$OUT" && "./$name")
 done

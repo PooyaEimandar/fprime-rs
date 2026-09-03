@@ -812,6 +812,30 @@ Phases 1–9 verifiable and Phase 10 not.
       with neither an FPP stand-in nor a mirror is still refused by name, and
       the message says which of the two it would need.
 
+      **The "byte-identical" claim is now actually proven.** Every file the
+      generator emits carries the line *"Serialization is byte-identical to
+      the C++ code FPP autocodes for the same model; the differential unit
+      test is the proof."* Until now that sentence was an intention. The
+      generated types supplied `SERIALIZED_SIZE` constants that C++
+      `static_assert`s pinned, and their `serialize_to` was exercised
+      indirectly through the Svc suites — but **nothing compared a single
+      serialized byte between the two languages.**
+
+      `Rust/test/differential/GeneratedTypesDiff.cpp` is that comparison. It
+      links the autocoded C++ and the generated Rust into one process and
+      serializes the same values with both, over the three shapes the
+      generator emits — chosen because each fails differently. A struct of two
+      `U32`s catches field order, which nothing else can, since a swap keeps
+      the length correct. An array sized by a named FPP constant catches the
+      element count and order. A struct mixing bools with two enums catches an
+      enum's serialized width, an FPP enum being a vtable-carrying class in
+      C++ and a newtype in Rust.
+
+      Checked by mutation, because a green differential test proves nothing on
+      its own: swapping `FrameHeader`'s two same-width fields fails
+      `FrameHeader` and nothing else, and widening `FrameContext`'s `vcId`
+      from `u8` to `u16` fails `FrameContext` and nothing else.
+
       **`Svc/ComQueue`'s types are now checked in, so the capability cannot
       rot.** `Rust/fprime-svc/src/generated/com_queue.rs` is there because it
       exercises exactly what unblocked it — an abstract type via the mirror,

@@ -2224,3 +2224,141 @@ pub unsafe extern "C" fn fprime_rs_rawtime_interval(
         *out_useconds = useconds;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Generated-type serialization, for the differential oracle
+// ---------------------------------------------------------------------------
+//
+// Every file the type generator emits carries the line "Serialization is
+// byte-identical to the C++ code FPP autocodes for the same model; the
+// differential unit test is the proof." These entry points are what make that
+// sentence true rather than merely intended: Rust/test/differential builds the
+// same values with the autocoded C++ types and compares the bytes.
+//
+// They exist for the test and nothing else, which is why they take the fields
+// individually instead of a mirrored struct -- the point is to drive the
+// generated code from outside without trusting a layout that is not part of
+// any contract.
+
+use fprime_svc::generated::com_cfg;
+use fprime_svc::generated::com_queue;
+use fprime_svc::generated::fprime_protocol;
+
+/// Serialize `Svc.FprimeProtocol.FrameHeader`; returns the byte count.
+///
+/// A struct of two primitives -- the simplest shape the generator emits.
+///
+/// # Safety
+/// `out` must point to `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_diff_frame_header(
+    start_word: u32,
+    length_field: u32,
+    out: *mut u8,
+    out_len: FwSizeType,
+) -> FwSizeType {
+    let value = fprime_protocol::SvcFprimeProtocolFrameHeader {
+        startWord: start_word,
+        lengthField: length_field,
+    };
+    // SAFETY: the caller guarantees `out_len` writable bytes.
+    let region = unsafe { view_mut(out, out_len as usize) };
+    let mut buf = SerBuffer::new(region);
+    match value.serialize_to(&mut buf, Endianness::Big) {
+        Ok(()) => buf.len() as FwSizeType,
+        Err(_) => 0,
+    }
+}
+
+/// Serialize `Svc.ComQueueDepth`; returns the byte count.
+///
+/// An array whose length came from a named FPP constant, which is the
+/// capability that unblocked real modules.
+///
+/// # Safety
+/// As above; `depths` must point to two readable `u32`s.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_diff_com_queue_depth(
+    depths: *const u32,
+    out: *mut u8,
+    out_len: FwSizeType,
+) -> FwSizeType {
+    // SAFETY: the caller guarantees two readable u32s.
+    let depths = unsafe { core::slice::from_raw_parts(depths, 2) };
+    let value = com_queue::SvcComQueueDepth([depths[0], depths[1]]);
+    // SAFETY: the caller guarantees `out_len` writable bytes.
+    let region = unsafe { view_mut(out, out_len as usize) };
+    let mut buf = SerBuffer::new(region);
+    match value.serialize_to(&mut buf, Endianness::Big) {
+        Ok(()) => buf.len() as FwSizeType,
+        Err(_) => 0,
+    }
+}
+
+/// Serialize `ComCfg.FrameContext`; returns the byte count.
+///
+/// A struct mixing primitives, bools and two enums -- the enum representation
+/// width is the interesting part, since FPP enums are a class with a vtable in
+/// C++ and a newtype here.
+///
+/// # Safety
+/// As above.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn fprime_rs_diff_frame_context(
+    com_queue_index: i16,
+    apid: u16,
+    has_sec_hdr: bool,
+    sequence_flags: u8,
+    sequence_count: u16,
+    vc_id: u8,
+    pvn: u8,
+    send_now: bool,
+    sa_index: u16,
+    out: *mut u8,
+    out_len: FwSizeType,
+) -> FwSizeType {
+    let value = com_cfg_context(
+        com_queue_index,
+        apid,
+        has_sec_hdr,
+        sequence_flags,
+        sequence_count,
+        vc_id,
+        pvn,
+        send_now,
+        sa_index,
+    );
+    // SAFETY: the caller guarantees `out_len` writable bytes.
+    let region = unsafe { view_mut(out, out_len as usize) };
+    let mut buf = SerBuffer::new(region);
+    match value.serialize_to(&mut buf, Endianness::Big) {
+        Ok(()) => buf.len() as FwSizeType,
+        Err(_) => 0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn com_cfg_context(
+    com_queue_index: i16,
+    apid: u16,
+    has_sec_hdr: bool,
+    sequence_flags: u8,
+    sequence_count: u16,
+    vc_id: u8,
+    pvn: u8,
+    send_now: bool,
+    sa_index: u16,
+) -> com_cfg::ComCfgFrameContext {
+    com_cfg::ComCfgFrameContext {
+        comQueueIndex: com_queue_index,
+        apid: com_cfg::ComCfgApid(apid),
+        hasSecHdr: has_sec_hdr,
+        sequenceFlags: sequence_flags,
+        sequenceCount: sequence_count,
+        vcId: vc_id,
+        pvn: com_cfg::ComCfgPvn(pvn),
+        sendNow: send_now,
+        saIndex: sa_index,
+    }
+}
