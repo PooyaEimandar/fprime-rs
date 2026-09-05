@@ -208,8 +208,9 @@ QueueInterface::Status PriorityQueue::send(const U8* buffer,
         // Space must exist, push must work
         const bool pushed = this->m_handle.m_heap.push(priority, index);
         FW_ASSERT(pushed);
+        // store_data records the length; writing m_sizes again here was a
+        // second place that had to agree with it.
         this->m_handle.store_data(index, buffer, size);
-        this->m_handle.m_sizes[index] = size;
         this->m_handle.m_highMark = std::max(this->m_handle.m_highMark, this->getMessagesAvailable());
     }
     this->m_handle.m_empty.notify();

@@ -1579,6 +1579,201 @@ pub unsafe extern "C" fn fprime_rs_maxheap_node_layout(
 }
 
 // ---------------------------------------------------------------------------
+// Os::Generic::PriorityQueue slot bookkeeping (Phase 16)
+// ---------------------------------------------------------------------------
+//
+// The other half of the queue whose ordering already runs in Rust: which slot
+// a message lands in, and where in the slab that slot is. The C++ keeps the
+// allocation, the mutex, the two condition variables and the FW_ASSERT
+// guards; it also keeps the full/empty decisions, which it takes from the
+// heap's size rather than from the ring (see fprime_utils::queue_slots).
+//
+// Every pointer here belongs to one `PriorityQueueHandle`, and the C++ calls
+// these only while holding that handle's `m_data_lock`, so nothing below
+// needs synchronization of its own.
+
+use fprime_utils::queue_slots::{SlotRing, SlotStore};
+
+/// Borrow a handle's free-index ring for one operation.
+///
+/// # Safety
+/// `indices` must point to `depth` initialized `FwSizeType`s, and `start` and
+/// `stop` must be valid pointers to the handle's cursors. `depth` may be
+/// zero, in which case `indices` may be null.
+unsafe fn slot_ring<'a>(
+    indices: *mut FwSizeType,
+    depth: FwSizeType,
+    start: *mut FwSizeType,
+    stop: *mut FwSizeType,
+) -> SlotRing<'a> {
+    assert!(
+        !indices.is_null() || depth == 0,
+        "queue index list is null with non-zero depth"
+    );
+    SlotRing {
+        indices: if depth == 0 {
+            &mut []
+        } else {
+            // SAFETY: the caller guarantees `depth` initialized entries at
+            // `indices`, non-null per the assert above.
+            unsafe { core::slice::from_raw_parts_mut(indices, depth as usize) }
+        },
+        // SAFETY: the caller guarantees these point at the handle's cursors.
+        start: unsafe { &mut *start },
+        // SAFETY: as above.
+        stop: unsafe { &mut *stop },
+    }
+}
+
+/// Borrow a handle's message slab for one operation.
+///
+/// # Safety
+/// `data` must point to `depth * max_size` writable bytes and `sizes` to
+/// `depth` initialized `FwSizeType`s. `depth` may be zero, in which case both
+/// may be null.
+unsafe fn slot_store<'a>(
+    data: *mut u8,
+    sizes: *mut FwSizeType,
+    depth: FwSizeType,
+    max_size: FwSizeType,
+) -> SlotStore<'a> {
+    assert!(
+        (!data.is_null() && !sizes.is_null()) || depth == 0,
+        "queue storage is null with non-zero depth"
+    );
+    let bytes = (depth as usize)
+        .checked_mul(max_size as usize)
+        .expect("queue slab size overflows a pointer");
+    SlotStore {
+        data: if depth == 0 {
+            &mut []
+        } else {
+            // SAFETY: the caller guarantees `depth * max_size` bytes at `data`.
+            unsafe { core::slice::from_raw_parts_mut(data, bytes) }
+        },
+        sizes: if depth == 0 {
+            &mut []
+        } else {
+            // SAFETY: the caller guarantees `depth` entries at `sizes`.
+            unsafe { core::slice::from_raw_parts_mut(sizes, depth as usize) }
+        },
+        max_size,
+    }
+}
+
+/// Fill the free-index ring with every slot and rewind both cursors.
+///
+/// Called once from `PriorityQueue::create`, after every allocation succeeded.
+///
+/// # Safety
+/// See [`slot_ring`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_queue_slots_reset(
+    indices: *mut FwSizeType,
+    depth: FwSizeType,
+    start: *mut FwSizeType,
+    stop: *mut FwSizeType,
+) {
+    // SAFETY: forwarded from the handle that owns this state.
+    let mut ring = unsafe { slot_ring(indices, depth, start, stop) };
+    ring.reset();
+}
+
+/// `PriorityQueueHandle::find_index`: take the next free slot.
+///
+/// # Safety
+/// See [`slot_ring`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_queue_slots_take(
+    indices: *mut FwSizeType,
+    depth: FwSizeType,
+    start: *mut FwSizeType,
+    stop: *mut FwSizeType,
+) -> FwSizeType {
+    // SAFETY: forwarded from the handle that owns this state.
+    let mut ring = unsafe { slot_ring(indices, depth, start, stop) };
+    ring.take()
+}
+
+/// `PriorityQueueHandle::return_index`: return a slot to the free list.
+///
+/// # Safety
+/// See [`slot_ring`].
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_queue_slots_give(
+    indices: *mut FwSizeType,
+    depth: FwSizeType,
+    start: *mut FwSizeType,
+    stop: *mut FwSizeType,
+    index: FwSizeType,
+) {
+    // SAFETY: forwarded from the handle that owns this state.
+    let mut ring = unsafe { slot_ring(indices, depth, start, stop) };
+    ring.give(index);
+}
+
+/// `PriorityQueueHandle::store_data`: copy a message into a slot.
+///
+/// # Safety
+/// See [`slot_store`]; `source` must point to `size` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_queue_slots_store(
+    data: *mut u8,
+    sizes: *mut FwSizeType,
+    depth: FwSizeType,
+    max_size: FwSizeType,
+    index: FwSizeType,
+    source: *const u8,
+    size: FwSizeType,
+) {
+    assert!(
+        !source.is_null() || size == 0,
+        "queue message is null with non-zero size"
+    );
+    // SAFETY: forwarded from the handle that owns this state.
+    let mut store = unsafe { slot_store(data, sizes, depth, max_size) };
+    let message = if size == 0 {
+        &[][..]
+    } else {
+        // SAFETY: the caller guarantees `size` readable bytes at `source`.
+        unsafe { core::slice::from_raw_parts(source, size as usize) }
+    };
+    store.store(index, message);
+}
+
+/// `PriorityQueueHandle::load_data`: copy a stored message out.
+///
+/// `size` is the stored length, which the C++ reads from `m_sizes` before
+/// calling -- not the receiver's capacity. Passing the capacity would copy
+/// whatever the slot's previous message left behind.
+///
+/// # Safety
+/// See [`slot_store`]; `destination` must point to `size` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_queue_slots_load(
+    data: *mut u8,
+    sizes: *mut FwSizeType,
+    depth: FwSizeType,
+    max_size: FwSizeType,
+    index: FwSizeType,
+    destination: *mut u8,
+    size: FwSizeType,
+) {
+    assert!(
+        !destination.is_null() || size == 0,
+        "queue destination is null with non-zero size"
+    );
+    // SAFETY: forwarded from the handle that owns this state.
+    let store = unsafe { slot_store(data, sizes, depth, max_size) };
+    if size == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees `size` writable bytes at `destination`.
+    let out = unsafe { core::slice::from_raw_parts_mut(destination, size as usize) };
+    store.load(index, out);
+}
+
+// ---------------------------------------------------------------------------
 // Os::FilePathUtils (Phase 9)
 // ---------------------------------------------------------------------------
 //

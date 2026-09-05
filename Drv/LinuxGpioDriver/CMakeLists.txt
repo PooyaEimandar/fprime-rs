@@ -30,3 +30,18 @@ elseif(${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
         "${CMAKE_CURRENT_LIST_DIR}/LinuxGpioDriver.hpp"
     )
 endif()
+
+### UTs ###
+# The interrupt loop itself needs a real gpiochip, but the decision it makes
+# on each poll() result does not -- classify_poll_result lives in
+# LinuxGpioDriverCommon.cpp, which every platform builds, so this runs
+# wherever the module does.
+if (FPRIME_USE_STUBBED_DRIVERS OR ${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
+    register_fprime_ut(
+        LinuxGpioDriverPollTest
+      SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/test/ut/GpioPollTest.cpp"
+      DEPENDS
+        Drv_LinuxGpioDriver
+    )
+endif()

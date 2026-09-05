@@ -51,6 +51,65 @@ def build(source, modules=None):
         return G.build_model(ast, analysis, modules)
 
 
+def build_ports(source, component="C"):
+    """Compile one FPP source and describe `component`'s input ports.
+
+    Component mode reads the raw AST and analysis rather than the Model, so it
+    needs its own entry point: the type generator's `build_model` is not on
+    this path at all, which is how the two halves drifted apart.
+    """
+    with tempfile.TemporaryDirectory() as raw:
+        work = pathlib.Path(raw)
+        model_fpp = work / "model.fpp"
+        model_fpp.write_text(source)
+        try:
+            ast, analysis = G.run_fpp_to_json([model_fpp], work)
+        except subprocess.CalledProcessError as exc:
+            raise AssertionError(
+                "fpp-to-json rejected the test model:\n"
+                + exc.stderr.decode(errors="replace")
+            ) from exc
+        return ast, analysis, G.collect_ports(ast, analysis, component, component)
+
+
+def build_shim(source, component="C"):
+    """The generated C++ shim text for `component`."""
+    ast, analysis, ports = build_ports(source, component)
+    return G.generate_component_shim(
+        G.component_module_path(ast, component),
+        component,
+        ports,
+        [],
+        [],
+        [],
+        "test.fpp",
+        "Test/C.hpp",
+        "Test/CGlue.h",
+    )
+
+
+def build_hpp(source, component="C"):
+    """The generated C++ class declaration for `component`."""
+    ast, analysis, ports = build_ports(source, component)
+    return G.generate_component_hpp(
+        G.component_module_path(ast, component),
+        component,
+        ports,
+        [],
+        "test.fpp",
+        "Test/Dir/C.hpp",
+    )
+
+
+def refusal(source, component="C"):
+    """The message the generator refuses `source` with."""
+    try:
+        build_ports(source, component)
+    except G.GeneratorError as exc:
+        return str(exc)
+    raise AssertionError("the generator accepted a model it cannot carry")
+
+
 def array_named(model, name):
     for path, array_name, elt, count, defaults in model.arrays:
         if array_name == name:
@@ -608,6 +667,241 @@ def a_string_default_is_folded():
     )
     rendered = G.generate(model, "m")
     assert 'FwString::<8>::from_bytes(b"hi")' in rendered, rendered[rendered.find("impl Default for MNamed"):][:300]
+
+
+# ---------------------------------------------------------------------------
+# Component mode (Phase 7/12): the glue generator
+# ---------------------------------------------------------------------------
+
+
+ENUM_RETURN_MODEL = """
+module M {
+  enum Status: U8 { OK = 0, ERR = 1 }
+  port Ask(which: U8) -> Status
+  passive component C {
+    sync input port askIn: M.Ask
+  }
+}
+"""
+
+
+@case
+def an_enum_return_crosses_as_its_representation():
+    """The port shape most of the framework uses: `... -> Drv.I2cStatus`.
+
+    Two different spellings have to come out of one descriptor: the handler is
+    declared returning the generated CLASS (it overrides an autocoded virtual,
+    so a mismatch would silently become an overload and never be called), and
+    the value crossing extern "C" is the enum's representation.
+    """
+    _, _, ports = build_ports(ENUM_RETURN_MODEL)
+    (port,) = ports
+    assert port.ret[0] == "enum", port.ret
+    assert G.c_type(port.ret) == "uint8_t", G.c_type(port.ret)
+    assert G.cpp_return_type(port.ret) == "Status", G.cpp_return_type(port.ret)
+    assert G.rust_param_type(port.ret) == "u8", G.rust_param_type(port.ret)
+
+
+@case
+def an_enum_return_is_rebuilt_through_serial_type():
+    """Never `static_cast<Status::T>`: that is undefined behaviour.
+
+    Rust can answer with any integer of the representation. Casting one
+    outside the enumeration straight to a plain C++ enum is UB, so the shim
+    goes through the generated class's SerialType constructor, which asserts
+    first. This pins the cast that must NOT appear as much as the one that
+    must.
+    """
+    shim = build_shim(ENUM_RETURN_MODEL)
+    assert "Status askIn_handler" in shim.replace("C ::", ""), shim
+    assert "const uint8_t rs_result =" in shim, shim
+    assert "return Status(static_cast<Status::SerialType>(rs_result));" in shim, shim
+    assert "static_cast<Status::T>" not in shim, shim
+    assert "static_cast<enum Status" not in shim, shim
+
+
+@case
+def a_ref_enum_is_written_back_through_serial_type():
+    """The same rule on the way out through a `ref` parameter.
+
+    (`state` would read better than `outcome` for the parameter, and is an FPP
+    keyword -- the trap this file's header warns about.)
+    """
+    shim = build_shim(
+        """
+        module M {
+          enum Status: U8 { OK = 0, ERR = 1 }
+          port Apply(ref outcome: Status)
+          passive component C {
+            sync input port applyIn: M.Apply
+          }
+        }
+        """
+    )
+    assert "outcome = Status(static_cast<Status::SerialType>(rs_outcome));" in shim, shim
+    assert "static_cast<Status::T>" not in shim, shim
+
+
+@case
+def a_returned_buffer_is_refused_with_the_alternative():
+    """Fw.Buffer crosses in, but a returned one has no allocation behind it."""
+    message = refusal(
+        """
+        module Fw { type Buffer }
+        module M {
+          port Get(n: U32) -> Fw.Buffer
+          passive component C {
+            sync input port getIn: M.Get
+          }
+        }
+        """
+    )
+    assert "Fw.Buffer return types are not generated" in message, message
+    assert "`ref` parameter" in message, message
+
+
+@case
+def a_refused_type_is_named():
+    """It used to say "got named" for every struct and array in the tree.
+
+    Which told you nothing: not the type, not the parameter. The point of a
+    refusal is that a human can act on it.
+    """
+    message = refusal(
+        """
+        module M {
+          struct Pair { a: U32, b: U32 }
+          port Send(p: Pair)
+          passive component C {
+            sync input port sendIn: M.Send
+          }
+        }
+        """
+    )
+    assert "got named" not in message, message
+    assert "Pair" in message, message
+    assert "struct" in message, message
+    assert "sendIn" in message, message
+
+
+@case
+def a_refused_string_is_named_as_a_string():
+    """A string is a different refusal path than a struct, and was silent."""
+    message = refusal(
+        """
+        type FwSizeStoreType = U16
+        module M {
+          port Send(label: string size 8)
+          passive component C {
+            sync input port sendIn: M.Send
+          }
+        }
+        """
+    )
+    assert "string" in message, message
+    assert "sendIn" in message, message
+
+
+@case
+def a_void_port_with_no_ref_parameters_returns_directly():
+    """The temporary is for `ref` write-back and enum rebuilding only.
+
+    Without this, a refactor that always introduces `rs_result` would go
+    unnoticed -- it compiles, and it changes every generated shim in the tree.
+    """
+    shim = build_shim(
+        """
+        module M {
+          port Ask(n: U32) -> U32
+          passive component C {
+            sync input port askIn: M.Ask
+          }
+        }
+        """
+    )
+    assert "rs_result" not in shim, shim
+    assert "return fprime_rs_c_askIn(" in shim, shim
+
+
+@case
+def the_header_and_the_shim_declare_the_same_signatures():
+    """A mismatch here does not fail to compile -- it silently misbehaves.
+
+    `foo_handler` declared with one signature in the header and defined with
+    another in the shim is two functions: the `override` fails only if the
+    header's version does not match the autocoded base, and the shim's
+    definition becomes a free-standing overload nothing calls. Generating both
+    from one descriptor is the fix; this checks they did not drift anyway.
+    """
+    model = """
+        module M {
+          enum Status: U8 { OK = 0, ERR = 1 }
+          port Ask(which: U8) -> Status
+          port Apply(ref outcome: Status)
+          passive component C {
+            sync input port askIn: M.Ask
+            sync input port applyIn: M.Apply
+          }
+        }
+    """
+    hpp = build_hpp(model)
+    shim = build_shim(model)
+    for signature in (
+        "Status askIn_handler(FwIndexType portNum, uint8_t which)",
+        "void applyIn_handler(FwIndexType portNum, Status& outcome)",
+    ):
+        assert f"    {signature} override;" in hpp, hpp
+        assert f"{signature} {{" in shim.replace("C ::", ""), shim
+
+
+@case
+def the_component_header_includes_the_autocoded_base_by_directory():
+    """An FPP module is a namespace; F Prime's directories are not it.
+
+    Svc.RustDemo lives in Svc/RustDemo/, and Svc.Ccsds.ApidManager lives in
+    Svc/Ccsds/ApidManager/. Deriving the include from the module path emits
+    `Svc/CComponentAc.hpp`, which does not exist -- and the failure is a
+    missing header at build time, far from here.
+    """
+    hpp = build_hpp(
+        """
+        module M {
+          port Ask(which: U8)
+          passive component C {
+            sync input port askIn: M.Ask
+          }
+        }
+        """
+    )
+    assert '#include "Test/Dir/CComponentAc.hpp"' in hpp, hpp
+
+
+@case
+def a_buffer_port_pulls_in_the_buffer_header():
+    """And a component without one does not: no unused includes."""
+    with_buffer = build_hpp(
+        """
+        module Fw { type Buffer }
+        module M {
+          port Take(ref b: Fw.Buffer)
+          passive component C {
+            sync input port takeIn: M.Take
+          }
+        }
+        """
+    )
+    assert '#include "Fw/Buffer/Buffer.hpp"' in with_buffer, with_buffer
+    without = build_hpp(
+        """
+        module M {
+          port Ask(which: U8)
+          passive component C {
+            sync input port askIn: M.Ask
+          }
+        }
+        """
+    )
+    assert "Fw/Buffer/Buffer.hpp" not in without, without
 
 
 def main():

@@ -45,7 +45,13 @@ struct PriorityQueueHandle : public QueueHandle {
     void store_data(FwSizeType index, const U8* source, FwSizeType size);
 
     //!\brief load data from a set index in the data store
-    void load_data(FwSizeType index, U8* destination, FwSizeType capacity);
+    //!\param index: slot to read
+    //!\param destination: where to copy the message
+    //!\param size: bytes to copy, which is the STORED length from m_sizes --
+    //!       not the receiver's capacity. Passing the capacity would copy
+    //!       whatever the slot's previous message left behind, and the
+    //!       assertion inside only bounds it by the slot width.
+    void load_data(FwSizeType index, U8* destination, FwSizeType size);
 };
 //! \brief generic priority queue implementation
 //!

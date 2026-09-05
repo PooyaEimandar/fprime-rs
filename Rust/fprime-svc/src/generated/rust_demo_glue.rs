@@ -52,6 +52,8 @@ impl Buffer {
 pub trait RustDemoHandlers: Sync {
     /// `addIn` (SyncInput)
     fn add_in(&self, port_num: i32, env: &Env, value: u32);
+    /// `classifyIn` (SyncInput)
+    fn classify_in(&self, port_num: i32, env: &Env, kind: u8) -> u8;
     /// `consumeIn` (SyncInput)
     fn consume_in(&self, port_num: i32, env: &Env, data: &mut Buffer);
     /// `queryIn` (SyncInput)
@@ -168,6 +170,35 @@ pub unsafe extern "C" fn fprime_rs_rustdemo_addIn(
         let env = unsafe { &*env };
         handlers.add_in(port_num, env, value);
     }
+}
+
+/// Dispatch stub for `classifyIn`, called by the generated C++ shim.
+///
+/// # Safety
+/// `handlers` must be a pointer produced by [`handler_ptr`], or null.
+/// `env` must point to a live Env for the calling instance.
+///
+/// A null `handlers` yields `u8::default()`: a component whose
+/// handlers were never installed answers with a zero rather than
+/// dereferencing.
+/// The shim rebuilds that zero as `RustDemoKind`, which asserts if
+/// the enumeration has no constant with that value.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rustdemo_classifyIn(
+    handlers: *const c_void,
+    port_num: i32,
+    env: *const Env,
+    kind: u8,
+) -> u8 {
+    // SAFETY: forwarded unchanged from the shim, which stores only
+    // pointers produced by `handler_ptr`.
+    if let Some(handlers) = unsafe { handlers_from(handlers) } {
+        // SAFETY: the shim builds the Env on its own stack
+        // and it outlives this call.
+        let env = unsafe { &*env };
+        return handlers.classify_in(port_num, env, kind);
+    }
+    u8::default()
 }
 
 /// Dispatch stub for `consumeIn`, called by the generated C++ shim.

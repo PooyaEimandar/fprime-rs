@@ -37,6 +37,10 @@ class RustDemoTester : public RustDemoGTestBase {
     //! the test can see what Rust wrote back
     Fw::Buffer consume(U8* data, FwSizeType size);
 
+    //! Drive classifyIn, whose RETURN type is an FPP enum: Rust answers with
+    //! the U8 representation and the generated shim rebuilds the object
+    RustDemoKind classify(U8 kind);
+
     //! The autocoded GTest base declares its assertion helpers protected, so
     //! surface the two this suite needs.
     void assertExceededSeed(U32 index, U32 total, U32 seed);

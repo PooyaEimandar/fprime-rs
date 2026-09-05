@@ -41,6 +41,9 @@ typedef struct fprime_rs_rustdemo_Env {
 //! Dispatch `addIn` (SyncInput) into the Rust handler
 void fprime_rs_rustdemo_addIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, uint32_t value);
 
+//! Dispatch `classifyIn` (SyncInput) into the Rust handler
+uint8_t fprime_rs_rustdemo_classifyIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, uint8_t kind);
+
 //! Dispatch `consumeIn` (SyncInput) into the Rust handler
 void fprime_rs_rustdemo_consumeIn(const void* handlers, int32_t portNum, const fprime_rs_rustdemo_Env* env, FprimeRsBuffer* data);
 

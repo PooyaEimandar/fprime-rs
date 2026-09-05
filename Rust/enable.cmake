@@ -67,6 +67,14 @@ option(FPRIME_RUST_IMPL_FW_STRINGS "Use the Rust Fw::StringUtils primitives" ON)
 # because errno is thread-local and the next failing call overwrites it.
 option(FPRIME_RUST_IMPL_OS_RAWTIME "Use the Rust Os::RawTime interval arithmetic" ON)
 
+# Phase 16, the component runtime: the message-slot bookkeeping of the OSAL
+# priority queue -- which slot a message lands in, and where in the slab that
+# slot is. The other half of the queue whose ordering already runs in Rust
+# (FPRIME_RUST_IMPL_OS_MAXHEAP above); together they are every non-OS decision
+# the queue makes. The allocation, the mutex and the two condition variables
+# stay in C++. Bounded per-message work, so ON like the rest of the OSAL.
+option(FPRIME_RUST_IMPL_OS_PRIORITYQUEUE "Use the Rust OSAL priority queue slot bookkeeping" ON)
+
 # Phase 4: verify the checked-in generated Rust still matches its FPP model as
 # part of the build. Opt-in because the generator needs fpp-to-json on PATH
 # (the fprime venv provides it). Must be registered before module detection.

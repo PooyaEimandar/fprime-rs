@@ -3,6 +3,9 @@ build-fprime-*/
 # The switch-OFF build cache: created by the rust.yml workflow's
 # "C++ originals still compile" step and by Rust/test/differential/run.sh.
 build-rust-off/
+# A local CMake build tree from the external-consumer check (a deployment
+# that finds F Prime with find_package rather than building it in-tree).
+build-stub/
 build-artifacts/
 gtest/
 docs-cache/

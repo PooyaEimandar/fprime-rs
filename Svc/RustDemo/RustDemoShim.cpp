@@ -38,6 +38,23 @@ void RustDemo ::addIn_handler(FwIndexType portNum, uint32_t value) {
     fprime_rs_rustdemo_addIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env, value);
 }
 
+RustDemoKind RustDemo ::classifyIn_handler(FwIndexType portNum, uint8_t kind) {
+    fprime_rs_rustdemo_Env env = {};
+    env.component = this;
+    env.exceeded_seed = [](void* component, uint32_t total, uint32_t seed) {
+        static_cast<RustDemo*>(component)->log_WARNING_LO_ExceededSeed(total, seed);
+    };
+    env.tlm_total = [](void* component, uint32_t value) { static_cast<RustDemo*>(component)->tlmWrite_Total(value); };
+    env.cmd_response = [](void* component, uint32_t opcode, uint32_t cmdSeq, uint32_t response) {
+        static_cast<RustDemo*>(component)->cmdResponse_out(
+            static_cast<FwOpcodeType>(opcode), cmdSeq,
+            Fw::CmdResponse(static_cast<Fw::CmdResponse::SerialType>(response)));
+    };
+    const uint8_t rs_result =
+        fprime_rs_rustdemo_classifyIn(this->m_rustHandlers, static_cast<int32_t>(portNum), &env, kind);
+    return RustDemoKind(static_cast<RustDemoKind::SerialType>(rs_result));
+}
+
 void RustDemo ::consumeIn_handler(FwIndexType portNum, Fw::Buffer& data) {
     FprimeRsBuffer rs_data = {data.getData(), data.getSize(), data.getContext()};
     fprime_rs_rustdemo_Env env = {};

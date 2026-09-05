@@ -31,12 +31,22 @@ LinuxI2cDriverTester ::~LinuxI2cDriverTester() {}
 
 // ----------------------------------------------------------------------
 // Tests
+//
+// NOTE: no CMakeLists.txt registers this harness, so nothing builds or runs
+// it. That is deliberate rather than an oversight -- main.cpp takes a
+// `-d <device>` argument and drives a real /dev/i2c-* node, which CI does not
+// have. It went stale while unbuilt: it called Fw::Buffer::setdata/setsize,
+// renamed to setData/setSize, and so had not compiled for some time. The two
+// calls are corrected, but the harness is still hardware-only. Anything that
+// should run in CI belongs in a separate test of the reachable error paths
+// (a closed fd yields I2C_OPEN_ERR; ioctl(I2C_SLAVE) on a non-i2c fd yields
+// I2C_ADDRESS_ERR), which does not exist yet.
 // ----------------------------------------------------------------------
 
 void LinuxI2cDriverTester ::sendData(U32 addr, U8* data, Fw::Buffer::SizeType size) {
     Fw::Buffer dataBuff;
-    dataBuff.setdata(static_cast<PlatformPointerCastType>(data));
-    dataBuff.setsize(size);
+    dataBuff.setData(data);
+    dataBuff.setSize(size);
     this->invoke_to_write(0, addr, dataBuff);
 }
 

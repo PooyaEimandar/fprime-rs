@@ -52,6 +52,10 @@ Fw::Buffer RustDemoTester::consume(U8* data, FwSizeType size) {
     return buffer;
 }
 
+RustDemoKind RustDemoTester::classify(U8 kind) {
+    return this->invoke_to_classifyIn(0, kind);
+}
+
 void RustDemoTester::sendSetTotal(U32 value) {
     this->sendCmd_SET_TOTAL(0, 10, value);
 }

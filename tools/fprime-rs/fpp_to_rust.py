@@ -1202,6 +1202,11 @@ def main():
     ap.add_argument("--out-header", type=Path, help="component mode: C header path")
     ap.add_argument("--out-shim", type=Path, help="component mode: C++ shim path")
     ap.add_argument(
+        "--out-component-header",
+        type=Path,
+        help="component mode: C++ component class declaration path",
+    )
+    ap.add_argument(
         "--shim-include",
         default="",
         help="component mode: include path the shim uses for the component header",
@@ -1275,11 +1280,13 @@ def main():
 # shim class forwarding handlers across. The shapes stabilized, so they are
 # generated here from the same FPP model that produces the C++ base.
 #
-# Scope, deliberately narrow: input ports whose parameters are all primitives
-# or bools passed by value, with no return type. Ports carrying Fw::Buffer,
-# user-defined types, `ref` parameters, or return values are refused by name
-# -- the marshalling for those is what the hand-written shims still do, and
-# guessing at it would produce plausible-but-wrong glue.
+# Scope: input ports whose parameters and return type are primitives, bools,
+# FPP enums or Fw.Buffer -- carried as VALUES across extern "C", by reference
+# or not. Structs, arrays and FPP strings are refused by name: those have no
+# stable ABI as objects, so they would have to cross in their serialized form,
+# which is a different design than this glue implements. Guessing at that
+# marshalling would produce plausible-but-wrong glue, so the generator stops
+# instead, naming the type and the parameter it stopped on.
 
 
 PORT_KIND_SYNC = "SyncInput"
@@ -1595,13 +1602,33 @@ def described_type(type_map, type_id, type_name_node, where):
         # no stable ABI -- but it is really (data, size, context), and those
         # three cross fine as a repr(C) triple.
         return ("buffer", None, None, cpp)
+    # A string is refused before resolve_type sees it. resolve_type is shared
+    # with the type generator, which always has a Model to fold the capacity
+    # with; on this path there is none, so it fails with "string capacity
+    # cannot be resolved here" -- a message with no port, no parameter and no
+    # hint that the type is the problem.
+    entry = type_map.get(str(type_id))
+    if isinstance(entry, dict) and "AbsType" in entry:
+        # Same reason as the string above: resolve_abstract has no Model here,
+        # so its refusal names the type "AST node 8484". Fw.Buffer is the one
+        # abstract type that crosses, and it returned already.
+        raise GeneratorError(
+            f"{where}: {cpp or '<unnamed type>'} is an FPP abstract type. Only "
+            f"Fw.Buffer crosses the generated boundary; the others are C++ "
+            f"classes with no stable ABI and no declared wire form here"
+        )
+    if isinstance(entry, dict) and "String" in entry:
+        raise GeneratorError(
+            f"{where}: an FPP string cannot cross the generated boundary. It "
+            f"has no fixed size as a C++ object; pass its contents as a "
+            f"Fw.Buffer, or keep the port in C++"
+        )
     # None: the component/FFI path carries values across extern "C" rather
     # than serializing them, so an abstract type's wire form is not what it
     # would need even if one were known.
     desc = resolve_type(None, type_map, type_id)
     if desc[0] in ("prim", "bool"):
         return desc
-    entry = type_map.get(str(type_id))
     if isinstance(entry, dict) and "Enum" in entry:
         repr_name = next(iter(entry["Enum"]["repType"]["kind"]))
         repr_rust, size = PRIMITIVES[repr_name]
@@ -1609,9 +1636,18 @@ def described_type(type_map, type_id, type_name_node, where):
         if cpp is None:
             raise GeneratorError(f"{where}: enum type has no qualified name")
         return ("enum", repr_rust, size, cpp)
+    # Name the type that was refused. `desc[0]` alone reads "got named" for
+    # every struct and array in the framework, which says nothing about which
+    # parameter to change.
+    name = cpp or "<unnamed type>"
+    if isinstance(entry, dict) and entry:
+        what = f"an FPP {next(iter(entry)).lower()}"
+    else:
+        what = "an unsupported type"
     raise GeneratorError(
-        f"{where}: only primitive, bool and enum types are generated yet, "
-        f"got {desc[0]}"
+        f"{where}: {name} is {what}. The generated boundary carries "
+        f"primitives, bool, FPP enums and Fw.Buffer; anything else would have "
+        f"to cross in its serialized form, which is a different design"
     )
 
 
@@ -1656,10 +1692,14 @@ def port_signature(definition, analysis, where):
     if return_node is not None:
         _, ret_id = unwrap(return_node)
         ret = described_type(type_map, ret_id, return_node, f"{where}: return type")
-        if ret[0] == "enum":
-            # A returned enum would have to be reconstructed as a C++ object on
-            # the way back, which is more than passing `.e` across.
-            raise GeneratorError(f"{where}: enum return types are not generated yet")
+        if ret[0] == "buffer":
+            # Returning a Fw::Buffer would hand C++ a triple Rust invented,
+            # with no allocation behind it that the framework owns. Passing one
+            # in by reference is a different thing, and that is supported.
+            raise GeneratorError(
+                f"{where}: Fw.Buffer return types are not generated; pass the "
+                f"buffer as a `ref` parameter instead"
+            )
     return spec_params(definition["params"], type_map, where), ret
 
 
@@ -1792,6 +1832,32 @@ def cpp_epilogue(param):
         # generated class's SerialType constructor asserts validity first.
         return [f"    {name} = {desc[3]}(static_cast<{desc[3]}::SerialType>(rs_{name}));"]
     return []
+
+
+def cpp_return_type(desc):
+    """The C++ spelling of a handler's return type.
+
+    An enum crosses the boundary as its representation, but the autocoded
+    handler this shim overrides is declared returning the generated enum
+    CLASS, so the shim's signature has to match it exactly or the override
+    silently becomes a new overload.
+    """
+    return desc[3] if desc[0] == "enum" else c_type(desc)
+
+
+def cpp_return_value(desc, expr):
+    """Turn what Rust returned into what the handler must return.
+
+    Constructed from the enum's SerialType, never cast to its raw `T`: Rust
+    can answer with any integer of the representation, and casting a value
+    outside the enumeration to a plain C++ enum is undefined behaviour. The
+    generated class's SerialType constructor asserts the value is one of the
+    enumerated ones first, so a Rust handler that answers with nonsense faults
+    where it happened rather than corrupting the caller.
+    """
+    if desc[0] == "enum":
+        return f"{desc[3]}(static_cast<{desc[3]}::SerialType>({expr}))"
+    return expr
 
 
 def snake(name):
@@ -1986,6 +2052,15 @@ def generate_component_rust(
                 "/// handlers were never installed answers with a zero rather than"
             )
             out.append("/// dereferencing.")
+            if port.ret[0] == "enum":
+                # Worth saying out loud: the zero is a representation, and the
+                # shim turns it back into an object through a constructor that
+                # asserts. An enum with no zero-valued constant faults there.
+                out.append(
+                    f"/// The shim rebuilds that zero as `{port.ret[3]}`, which "
+                    "asserts if"
+                )
+                out.append("/// the enumeration has no constant with that value.")
         out.append("#[no_mangle]")
         out.append(
             f'pub unsafe extern "C" fn {prefix}_{port.name}('
@@ -2298,6 +2373,100 @@ def env_construction(component, events, channels, commands, prefix):
     return out
 
 
+def generate_component_hpp(
+    module_path, component, ports, commands, model_label, shim_include
+):
+    """The C++ class declaration for a component whose logic is in Rust.
+
+    This is the last hand-written C++ artifact a Rust component had. It is
+    pure restatement -- every line is derivable from the model -- and being
+    hand-written meant every port added to the FPP had to be mirrored here by
+    someone who remembered to, with the compiler catching only the half of the
+    mistakes that break an `override`.
+
+    The declarations must match `generate_component_shim` exactly, which is
+    why both are generated from one descriptor: a mismatch does not fail to
+    compile, it quietly becomes a new overload that the autocoded base never
+    calls, leaving the port dispatching into a pure-virtual or a no-op.
+    """
+    namespaces = list(module_path) if module_path else ["Components"]
+    guard = "_".join(namespaces + [component, "HPP"])
+    # From the header's OWN include path, not from the module path: an FPP
+    # module is a namespace, and F Prime's directory layout does not follow it
+    # (Svc.RustDemo lives in Svc/RustDemo/, and Svc.Ccsds.ApidManager lives in
+    # Svc/Ccsds/ApidManager/). fpp-to-cpp puts the autocoded base beside the
+    # model, which is beside this header.
+    directory = shim_include.rsplit("/", 1)[0] if "/" in shim_include else ""
+    ac_include = f"{directory}/" if directory else ""
+    ac_include += f"{component}ComponentAc.hpp"
+    needs_buffer = any(
+        p.desc[0] == "buffer" for port in ports for p in port.params
+    ) or any(p.desc[0] == "buffer" for command in commands for p in command.params)
+
+    out = [
+        "// ======================================================================",
+        f"// GENERATED by tools/fprime-rs/fpp_to_rust.py --component -- do not edit.",
+        f"// Model: {model_label}",
+        "//",
+        f"// Declaration for {'.'.join(list(module_path) + [component])}: the"
+        " definitions",
+        "// are in the generated shim, and the behavior is in Rust.",
+        "// ======================================================================",
+        "",
+        f"#ifndef {guard}",
+        f"#define {guard}",
+        "",
+    ]
+    if needs_buffer:
+        out.append('#include "Fw/Buffer/Buffer.hpp"')
+    out += [
+        f'#include "{ac_include}"',
+        "",
+    ]
+    out += [f"namespace {name} {{" for name in namespaces]
+    out += [
+        "",
+        f"class {component} final : public {component}ComponentBase {{",
+        "  public:",
+        f"    //! Construct {component} object",
+        f"    {component}(const char* const compName);",
+        "",
+        f"    //! Destroy {component} object",
+        f"    ~{component}();",
+        "",
+        "    //! Install the Rust instance that answers this component's ports.",
+        "    //! Call once during initialization, before the topology connects",
+        "    //! ports: the pointer is read by every handler and is not",
+        "    //! synchronized.",
+        "    void setRustHandlers(const void* handlers);",
+        "",
+        "  private:",
+    ]
+    for port in ports:
+        args = "".join(f", {cpp_param_type(p)}" for p in port.params)
+        ret = cpp_return_type(port.ret) if port.ret else "void"
+        out.append(f"    //! Handler for input port {port.name} ({port.kind})")
+        out.append(f"    {ret} {port.name}_handler(FwIndexType portNum{args}) override;")
+        out.append("")
+    for command in commands:
+        args = "".join(f", {cpp_param_type(p)}" for p in command.params)
+        out.append(f"    //! Handler for the {command.name} command")
+        out.append(
+            f"    void {command.name}_cmdHandler("
+            f"FwOpcodeType opCode, U32 cmdSeq{args}) override;"
+        )
+        out.append("")
+    out += [
+        "    //! The Rust instance, installed by setRustHandlers",
+        "    const void* m_rustHandlers;",
+        "};",
+        "",
+    ]
+    out += [f"}}  // namespace {name}" for name in reversed(namespaces)]
+    out += ["", f"#endif  // {guard}", ""]
+    return "\n".join(out)
+
+
 def generate_component_shim(
     module_path,
     component,
@@ -2351,7 +2520,7 @@ def generate_component_shim(
     for port in ports:
         args = "".join(f", {cpp_param_type(p)}" for p in port.params)
         call = "".join(f", {cpp_argument(p)}" for p in port.params)
-        ret = c_type(port.ret) if port.ret else "void"
+        ret = cpp_return_type(port.ret) if port.ret else "void"
         out.append(
             f"{ret} {component} ::{port.name}_handler(FwIndexType portNum{args}) {{"
         )
@@ -2365,10 +2534,14 @@ def generate_component_shim(
             f"static_cast<int32_t>(portNum){env_arg}{call})"
         )
         epilogue = [line for p in port.params for line in cpp_epilogue(p)]
-        if epilogue and port.ret:
-            out.append(f"    const {ret} rs_result = {invoke};")
+        # A `ref` parameter has to be written back before the return, and an
+        # enum has to be rebuilt as an object, so either one needs the value
+        # held in a local first. The local is typed as what CROSSED -- the
+        # representation -- not as the handler's return type.
+        if port.ret and (epilogue or port.ret[0] == "enum"):
+            out.append(f"    const {c_type(port.ret)} rs_result = {invoke};")
             out += epilogue
-            out.append("    return rs_result;")
+            out.append(f"    return {cpp_return_value(port.ret, 'rs_result')};")
         else:
             out.append(f"    {'return ' if port.ret else ''}{invoke};")
             out += epilogue
@@ -2481,6 +2654,20 @@ def emit_component(ast, analysis, args):
             ),
         ),
     ]
+    if args.out_component_header is not None:
+        writes.append(
+            (
+                args.out_component_header,
+                generate_component_hpp(
+                    module_path,
+                    args.component,
+                    ports,
+                    commands,
+                    args.module_name,
+                    args.shim_include,
+                ),
+            )
+        )
     for path, text in writes:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -2490,6 +2677,8 @@ def emit_component(ast, analysis, args):
     # the format check and the CI byte-diff of this generator's output in
     # direct conflict -- the same trap gen_fw_kernel.py hit in Phase 8.
     clang_format_cpp(args.out_shim)
+    if args.out_component_header is not None:
+        clang_format_cpp(args.out_component_header)
 
     if shutil.which("rustfmt") is not None:
         subprocess.run(["rustfmt", "--edition", "2021", str(args.out)], check=True)

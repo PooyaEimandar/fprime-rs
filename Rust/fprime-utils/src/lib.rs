@@ -18,3 +18,4 @@ pub mod circular;
 pub mod crc32;
 pub mod max_heap;
 pub mod path;
+pub mod queue_slots;

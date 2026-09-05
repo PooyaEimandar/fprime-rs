@@ -20,6 +20,24 @@
 
 namespace Drv {
 
+//! What the interrupt poll loop should do next, given one poll() result.
+//!
+//! Free and pure so it can be tested without a gpiochip; the loop itself
+//! needs a real character device, which CI does not have.
+enum class GpioPollAction {
+    READ_EVENT,           //!< data is ready; read the event record
+    IDLE,                 //!< the poll timed out, which is the normal idle path
+    RETRY_QUIETLY,        //!< interrupted by a signal; not an error, do not report
+    REPORT_AND_BACK_OFF,  //!< a real error; report it, then pace before retrying
+};
+
+//! Classify a poll() return value and its errno.
+//!
+//! \param pollStatus: poll()'s return value
+//! \param pollErrno: errno, meaningful only when pollStatus is negative
+//! \return what the loop should do next
+GpioPollAction classify_poll_result(int pollStatus, int pollErrno);
+
 class LinuxGpioDriver final : public LinuxGpioDriverComponentBase {
   public:
     static constexpr FwSizeType GPIO_POLL_TIMEOUT = 500;  // Timeout looking for interrupts to check for shutdown

@@ -25,6 +25,7 @@
 
 namespace Drv {
 
+
 Os::File::Status errno_to_file_status(int errno_input) {
     Os::File::Status status = Os::File::Status::OTHER_ERROR;
     switch (errno_input) {
@@ -435,8 +436,10 @@ void LinuxGpioDriver ::pollLoop() {
         file_descriptors[0].events = POLLIN;  // Ask for read data available
         // Poll for fd bing ready
         int status = ::poll(file_descriptors, 1, static_cast<int>(GPIO_POLL_TIMEOUT));
+        const int poll_errno = errno;
+        const GpioPollAction action = classify_poll_result(status, poll_errno);
         // Check for some file descriptor to be ready
-        if (status > 0) {
+        if (action == GpioPollAction::READ_EVENT) {
             union {
                 struct gpioevent_data v1;
 #ifdef GPIO_V2_GET_LINE_IOCTL
@@ -465,8 +468,18 @@ void LinuxGpioDriver ::pollLoop() {
             }
         }
         // An error of some kind occurred
-        else if (status < 0) {
-            this->log_WARNING_HI_PollingError(static_cast<I32>(errno));
+        else if (action == GpioPollAction::REPORT_AND_BACK_OFF) {
+            this->log_WARNING_HI_PollingError(static_cast<I32>(poll_errno));
+            // Pace the retry. poll() returns immediately on a persistent
+            // error, so without this the loop spins at CPU speed and emits one
+            // event per iteration. Backing off by the poll timeout keeps a
+            // failed fd costing exactly what an idle one costs.
+            // Same expression LinuxGpioDriverStub.cpp:66 already uses, rather
+            // than a microseconds-only one: Fw::TimeInterval::set asserts
+            // useconds < 1e6, so a GPIO_POLL_TIMEOUT raised to 1000 would
+            // fault on a form that did not split out the seconds.
+            (void)Os::Task::delay(
+                Fw::TimeInterval(GPIO_POLL_TIMEOUT / 1000, (GPIO_POLL_TIMEOUT % 1000) * 1000));
         }
     }
 }

@@ -79,6 +79,24 @@ TEST(RustDemo, ReturnValueAndEnumParameterCrossTheGeneratedBoundary) {
     ASSERT_EQ(tester.query(Svc::RustDemoKind::COUNT), 2u) << "the enum parameter did not select";
 }
 
+TEST(RustDemo, EnumReturnValueCrossesTheGeneratedBoundary) {
+    // Phase 12: an enum RETURN value. The representation crosses extern "C"
+    // and the generated shim rebuilds Svc::RustDemoKind from it -- which is
+    // the shape of every status-returning port in the framework
+    // (Drv::I2cStatus, Fw::Success, Fw::TlmValid, ...).
+    Svc::RustDemoTester tester;
+    resetComponent(tester);
+
+    ASSERT_EQ(tester.classify(0), Svc::RustDemoKind::TOTAL);
+    ASSERT_EQ(tester.classify(1), Svc::RustDemoKind::COUNT);
+    // A raw value the enumeration does not have. Rust clamps it, so what
+    // comes back is a valid object rather than a fault -- and the object is
+    // a real RustDemoKind, not an integer that merely compares equal.
+    const Svc::RustDemoKind answered = tester.classify(200);
+    ASSERT_EQ(answered, Svc::RustDemoKind::TOTAL);
+    ASSERT_TRUE(answered.isValid()) << "the shim handed back a value outside the enumeration";
+}
+
 TEST(RustDemo, RustEmitsAnEventThroughTheGeneratedEnv) {
     // The one thing Rust cannot do alone: the autocoded base owns the time
     // port and the event buffer, so emitting goes back out through the Env

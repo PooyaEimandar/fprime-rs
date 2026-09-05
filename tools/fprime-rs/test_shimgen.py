@@ -30,6 +30,7 @@ import gen_fw_strings
 import gen_fw_time
 import gen_os_filepath
 import gen_os_maxheap
+import gen_os_priorityqueue
 import gen_os_rawtime
 
 # (shim, [(description, which file, find, replace, expected_up_to_date)])
@@ -146,6 +147,54 @@ CASES = [
                 "clock_gettime(CLOCK_REALTIME",
                 "clock_gettime(CLOCK_MONOTONIC",
                 False,
+            ),
+        ],
+    ),
+    (
+        gen_os_priorityqueue.SHIM,
+        [
+            (
+                # The modular arithmetic that keeps the free-index ring
+                # circular. Dropping the wrap runs off the end of the list on
+                # the depth-th message rather than reusing slot 0.
+                "upstream edit inside a replaced body: the ring wrap",
+                "source",
+                "this->m_startIndex = (this->m_startIndex + 1) % this->m_depth;",
+                "this->m_startIndex = this->m_startIndex + 1;",
+                False,
+            ),
+            (
+                # The slab stride. Using the message size instead of the slot
+                # width makes slot 1 start inside slot 0.
+                "upstream edit inside a replaced body: the slab stride",
+                "source",
+                "FwSizeType offset = this->m_maxSize * index;\n    (void)::memcpy(this->m_data + offset",
+                "FwSizeType offset = size * index;\n    (void)::memcpy(this->m_data + offset",
+                False,
+            ),
+            (
+                # send/receive deliberately stay in C++ -- they are the mutex,
+                # the condition variables and the blocking policy -- so a
+                # change to either is exactly what this check is for.
+                "upstream edit outside every replaced body: the full check",
+                "source",
+                "if (this->m_handle.m_heap.isFull() and blockType == BlockingType::NONBLOCKING) {",
+                "if (this->m_handle.m_heap.isFull() or blockType == BlockingType::NONBLOCKING) {",
+                False,
+            ),
+            (
+                "content edit of the generated file",
+                "target",
+                "FW_ASSERT(size <= this->m_maxSize);",
+                "FW_ASSERT(size < this->m_maxSize);",
+                False,
+            ),
+            (
+                "reformat of the generated file",
+                "target",
+                "namespace Generic {",
+                "namespace Generic\n{",
+                True,
             ),
         ],
     ),

@@ -141,7 +141,18 @@ is UB even if nothing reads that far. An unterminated string within the bound
 is reported as a malformed path rather than scanned past, which is what the
 C++ `Fw::StringUtils::string_length` bound does.
 
-Otherwise `max_heap` and `path` are safe modules in `fprime-utils`, and their
+Phase 16 adds `queue_slots` on the same footing as `max_heap`: a safe module
+whose FFI wrapper builds slices over storage the C++ `PriorityQueueHandle`
+allocated. It adds no new unsafe pattern — the two constructors assert the
+pointers are non-null unless the depth is zero, exactly as `heap` does, and
+the slab's `depth * max_size` product is computed with `checked_mul` before it
+becomes a slice length, because a wrap there would produce a slice shorter
+than the allocation it describes rather than a failure. Every one of these
+entry points is called by the C++ only while holding the handle's
+`m_data_lock`, so none of them synchronizes: the lock is the C++ side's, and
+moving it would have split one mutex across two languages.
+
+Otherwise `max_heap`, `queue_slots` and `path` are safe modules in `fprime-utils`, and their
 FFI wrappers build a slice over caller-provided storage exactly as the Phase 8
 scalar entries do. The one
 thing worth naming is that `MaxHeap`'s node array is allocated and indexed by

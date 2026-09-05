@@ -53,6 +53,54 @@ void fprime_rs_maxheap_node_layout(FwSizeType* size,
                                    FwSizeType* orderOffset,
                                    FwSizeType* idOffset);
 
+// Os::Generic::PriorityQueue message slots (Phase 16). The queue's other
+// half: MaxHeap decides which message comes out next, these decide which slot
+// it lives in and where in the slab that slot is. The C++ keeps the
+// allocation, the mutex, the two condition variables and every FW_ASSERT, and
+// calls these only while holding the handle's m_data_lock.
+//
+// The ring cannot tell "all slots free" from "all slots taken" -- both are
+// start == stop -- so the caller must check the heap's isFull()/isEmpty()
+// before taking or returning an index, which is what PriorityQueue::send and
+// ::receive already do. Rust preserves that rather than adding a second count
+// of the same fact.
+
+//! Fill the ring with every slot, free, and rewind both cursors.
+void fprime_rs_queue_slots_reset(FwSizeType* indices, FwSizeType depth, FwSizeType* start, FwSizeType* stop);
+
+//! Take the next free slot index.
+FwSizeType fprime_rs_queue_slots_take(FwSizeType* indices,
+                                      FwSizeType depth,
+                                      FwSizeType* start,
+                                      FwSizeType* stop);
+
+//! Return a slot index to the free list.
+void fprime_rs_queue_slots_give(FwSizeType* indices,
+                                FwSizeType depth,
+                                FwSizeType* start,
+                                FwSizeType* stop,
+                                FwSizeType index);
+
+//! Copy a message into a slot and record its length.
+void fprime_rs_queue_slots_store(U8* data,
+                                 FwSizeType* sizes,
+                                 FwSizeType depth,
+                                 FwSizeType maxSize,
+                                 FwSizeType index,
+                                 const U8* source,
+                                 FwSizeType size);
+
+//! Copy a stored message out. `size` is the STORED length, which the caller
+//! reads from `sizes` -- not the receiver's capacity. Passing the capacity
+//! would copy whatever the slot's previous message left behind.
+void fprime_rs_queue_slots_load(U8* data,
+                                FwSizeType* sizes,
+                                FwSizeType depth,
+                                FwSizeType maxSize,
+                                FwSizeType index,
+                                U8* destination,
+                                FwSizeType size);
+
 // Os::FilePathUtils: textual path resolution and sandbox containment. Both
 // return an Os::FilePathUtils::Status integer value. `baseDir` may be null,
 // which is an error only for a relative path. Strings must be terminated

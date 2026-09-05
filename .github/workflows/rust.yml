@@ -175,7 +175,7 @@ jobs:
           diff -u Rust/fprime-config/src/lib.rs /tmp/generated-config.rs
           diff -u Rust/RustConfigCheck.cpp /tmp/generated-check.cpp
       - name: Generated Rust-backed C++ shims match their originals
-        # Phases 8 and 9: each of these is a generated near-copy of an
+        # Phases 8, 9, 14, 15 and 16: each of these is a generated near-copy of an
         # upstream file. Catch an upstream edit that never reached one --
         # otherwise the C++ and Rust implementations drift apart silently.
         # Needs no toolchain beyond Python, so it runs in this light job too.
@@ -187,6 +187,7 @@ jobs:
           python3 tools/fprime-rs/gen_fw_time.py --check
           python3 tools/fprime-rs/gen_fw_strings.py --check
           python3 tools/fprime-rs/gen_os_rawtime.py --check
+          python3 tools/fprime-rs/gen_os_priorityqueue.py --check
       - name: Fw::Buffer's wire order still matches its Rust mirror
         # Fw::Buffer is an FPP abstract type: nothing generates it, so
         # Rust/fprime-core/src/fw_buffer.rs mirrors the C++ by hand. The size
@@ -237,6 +238,16 @@ jobs:
         run: |
           . fprime-venv/bin/activate
           python3 tools/fprime-rs/test_fpp_to_rust.py --require-tools
+      - name: The checked-in component glue still matches its model
+        # Component mode's outputs are C++ that the build compiles, so unlike
+        # type mode they are checked in rather than regenerated at configure
+        # time -- which means nothing forces them to stay in step with
+        # Svc/RustDemo/*.fpp. Four files (the Rust glue, the C header, the C++
+        # shim and the component header) are all derived from one model; a
+        # hand edit to any of them would otherwise survive indefinitely.
+        run: |
+          . fprime-venv/bin/activate
+          tools/fprime-rs/regen_component_glue.sh --check
       - name: Generate the Ref build cache
         working-directory: TestDeploymentsProject
         run: |
@@ -327,20 +338,11 @@ jobs:
             Svc/Ports/CommsPorts/CommsPorts.fpp Svc/Sched/Sched.fpp \
             Svc/ComQueue/ComQueue.fpp
           diff -u Rust/fprime-svc/src/generated/com_queue.rs /tmp/com_queue.rs
-          python3 tools/fprime-rs/fpp_to_rust.py \
-            --module-name "Svc/RustDemo/RustDemo.fpp" --component RustDemo \
-            --out /tmp/rust_demo_glue.rs --out-header /tmp/RustDemoGlue.h \
-            --out-shim /tmp/RustDemoShim.cpp \
-            --shim-include "Svc/RustDemo/RustDemo.hpp" \
-            --glue-include "Rust/RustDemoGlue.h" \
-            cmake/platform/unix/Platform/PlatformTypes.fpp \
-            default/config/FpConfig.fpp default/config/ComCfg.fpp \
-            Fw/Buffer/Buffer.fpp Fw/Log/Log.fpp Fw/Time/Time.fpp \
-            Fw/Cmd/Cmd.fpp Fw/Tlm/Tlm.fpp \
-            Svc/RustDemo/RustDemoPorts.fpp Svc/RustDemo/RustDemo.fpp
-          diff -u Rust/fprime-svc/src/generated/rust_demo_glue.rs /tmp/rust_demo_glue.rs
-          diff -u Svc/RustDemo/RustDemoShim.cpp /tmp/RustDemoShim.cpp
-          diff -u Rust/RustDemoGlue.h /tmp/RustDemoGlue.h
+          # The component glue is four files from one model, and the
+          # invocation that produces them lives in a script rather than here:
+          # it was duplicated in this workflow, and the copy did not cover the
+          # generated component header when that was added.
+          tools/fprime-rs/regen_component_glue.sh --check
       - name: Generate UT build cache
         # FPRIME_RUST_AUTOCODE=ON exercises cmake/autocoder/rust.cmake, which
         # re-verifies the checked-in generated Rust against its model at build
@@ -361,7 +363,7 @@ jobs:
           . fprime-venv/bin/activate
           CACHE="$PWD/build-rust-off"
           fprime-util generate --ut --build-cache "$CACHE" -DFPRIME_ENABLE_RUST=OFF
-          for dir in Fw/Types Fw/Time Fw/Buffer Fw/Com Fw/Tlm Os Os/Posix Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
+          for dir in Fw/Types Fw/Time Fw/Buffer Fw/Com Fw/Tlm Os Os/Posix Os/Generic Os/Generic/Types Utils/Types Utils/Hash CFDP/Checksum \
                      Svc/FprimeDeframer Svc/FprimeFramer Svc/FrameAccumulator \
                      Svc/FprimeRouter Svc/ComQueue; do
             (cd "$dir" && fprime-util build --ut --build-cache "$CACHE" -j4)

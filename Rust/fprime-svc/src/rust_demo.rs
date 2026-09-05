@@ -140,6 +140,18 @@ impl RustDemoHandlers for RustDemo {
             _ => self.total(),
         }
     }
+
+    fn classify_in(&self, _port_num: i32, _env: &Env, kind: u8) -> u8 {
+        // The return crosses as the enum's U8 representation and the shim
+        // rebuilds `Svc::RustDemoKind` from it through a constructor that
+        // asserts the value is one of the enumerated ones. So this must never
+        // answer with an integer outside the enumeration -- a raw `kind` the
+        // caller invented is clamped to TOTAL here rather than passed through.
+        match kind {
+            KIND_COUNT => KIND_COUNT,
+            _ => KIND_TOTAL,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -192,6 +204,24 @@ mod tests {
             10,
             "an out-of-range kind falls back to the total rather than faulting"
         );
+    }
+
+    #[test]
+    fn classify_never_answers_outside_the_enumeration() {
+        let component = RustDemo::new();
+        let env = quiet_env();
+        assert_eq!(component.classify_in(0, &env, KIND_TOTAL), KIND_TOTAL);
+        assert_eq!(component.classify_in(0, &env, KIND_COUNT), KIND_COUNT);
+        // Every other representation, not just a couple of samples: the C++
+        // shim asserts on anything the enumeration does not have, so an
+        // answer outside {TOTAL, COUNT} would fault the flight software.
+        for raw in 0..=u8::MAX {
+            let answered = component.classify_in(0, &env, raw);
+            assert!(
+                answered == KIND_TOTAL || answered == KIND_COUNT,
+                "classify({raw}) answered {answered}, which Svc::RustDemoKind does not have"
+            );
+        }
     }
 
     #[test]

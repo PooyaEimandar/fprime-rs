@@ -1,16 +1,20 @@
 # ======================================================================
 # RustDemo.fpp
 #
-# A component that exists to demonstrate fprime-rs Phase 7: every line of
-# glue connecting this component to its Rust implementation is GENERATED
-# from this model by tools/fprime-rs/fpp_to_rust.py --component. Nothing
-# between the autocoded C++ base and the Rust trait is hand-written.
+# A component that exists to demonstrate fprime-rs Phase 7: every line of C++
+# for this component is GENERATED from this model by
+# tools/fprime-rs/fpp_to_rust.py --component -- the class declaration
+# (RustDemo.hpp) and the shim that defines it (RustDemoShim.cpp) as well as
+# the C declarations and the Rust dispatch layer. The model you are reading,
+# the Rust implementation and a CMakeLists are the whole component.
 #
-# Its ports cover what the generator can carry: primitives, bools, values
-# returned across the boundary, parameters whose type is an FPP enum, and
-# emitting an event from Rust through the generated Env. Ports carrying
-# Fw::Buffer, structs or arrays still need the hand-written marshalling the
-# earlier phases established.
+# Its ports cover what the generator can carry: primitives, bools, `ref`
+# parameters written back to the caller, `ref Fw.Buffer`, parameters and
+# return values whose type is an FPP enum, and emitting an event, a telemetry
+# channel and a command response from Rust through the generated Env. Ports
+# carrying structs, arrays or FPP strings are still refused by the generator:
+# those would have to cross in their serialized form, which is a different
+# design than passing values across extern "C".
 # ======================================================================
 
 module Svc {
@@ -35,6 +39,9 @@ module Svc {
 
         @ Consume a buffer's bytes, through a `ref Fw.Buffer`
         sync input port consumeIn: Svc.RustDemoConsume
+
+        @ Classify a raw kind, answered with an FPP enum
+        sync input port classifyIn: Svc.RustDemoClassify
 
         @ The running total passed the value it was reset to
         event ExceededSeed(total: U32, seed: U32) \

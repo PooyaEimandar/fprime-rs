@@ -29,4 +29,11 @@ module Svc {
     @ were consumed by shrinking it. Exercises `ref Fw.Buffer`, the most
     @ common non-primitive parameter shape in the framework.
     port RustDemoConsume(ref data: Fw.Buffer)
+
+    @ Answer which quantity a raw kind selects. Exercises an enum RETURN
+    @ value -- the shape every status-returning port in the framework has:
+    @ the representation crosses the boundary and the generated shim rebuilds
+    @ the C++ object through a constructor that rejects a value the
+    @ enumeration does not have.
+    port RustDemoClassify(kind: U8) -> RustDemoKind
 }

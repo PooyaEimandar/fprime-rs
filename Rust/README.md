@@ -65,7 +65,10 @@ mixed C++/Rust deployments working at every step.
       are also refused. The retrofit onto generated types is the deframer's
       header parse and the protocol size constants; the trailer read and the
       framer's writes are still hand-rolled.
-- [~] **Phase 5 — partial**: what moved to Rust is ComQueue's *priority-selection
+- [x] **Phase 5 — closed.** ComQueue's scheduling moved and the UART was
+      characterized; the phase's own named open defect — the GPIO poll-error
+      spin — is fixed and tested, and the two driver ambitions it could not
+      reach are retired below rather than left dangling. **Was: partial**: what moved to Rust is ComQueue's *priority-selection
       predicate* — roughly 19 lines deciding which queue to drain next and how
       far its same-priority run extends (`fprime-svc/src/comqueue.rs`). **This is
       not an active-component port:** the thread, the `Os::Queue`, enqueue, the
@@ -88,6 +91,49 @@ mixed C++/Rust deployments working at every step.
       infrastructure first, so the GPIO poll-error spin is still unfixed.
       I2C's `test/ut` is unregistered, does not compile against the current
       `Fw::Buffer` API, and needs real hardware — it is not coverage
+      **Closing the phase: the GPIO defect, and two ambitions retired.**
+
+      The entry named one open defect and it is now fixed. The interrupt poll
+      loop logged `WARNING_HI_PollingError` and continued, with no backoff. A
+      persistent error — a closed or invalid descriptor — makes `poll()` return
+      immediately, so the loop span at CPU speed emitting one event per
+      iteration. Worse, it counted `EINTR` as an error: a signal arriving
+      during `poll()` is normal operation, and reporting it produced a stream
+      of events describing nothing wrong.
+
+      The decision is now a free, pure `classify_poll_result(status, errno)`
+      in the platform-independent `LinuxGpioDriverCommon.cpp` — the same shape
+      this phase used for the ComQueue selector, and for the same reason: the
+      loop needs a real gpiochip and cannot run in CI, but the decision it
+      makes does not. `EINTR` retries quietly; a real error is reported and
+      then paced by the poll timeout, so a failed descriptor costs exactly
+      what an idle one costs. **`Drv/LinuxGpioDriver` had no unit test of any
+      kind**; it has four now, and they run in the default build.
+
+      Writing it surfaced a bug in the first draft of the fix. Pacing by
+      `Fw::TimeInterval(0, GPIO_POLL_TIMEOUT * 1000)` is correct only while the
+      timeout stays under a second: `TimeInterval::set` asserts
+      `useconds < 1e6`, so raising `GPIO_POLL_TIMEOUT` to 1000 would have
+      faulted. `LinuxGpioDriverStub.cpp` already had the general form, and it
+      is what the fix uses.
+
+      `Drv/LinuxI2cDriver/test/ut` turned out to be dead: unregistered by any
+      `CMakeLists.txt`, and calling `Fw::Buffer::setdata`/`setsize`, renamed to
+      `setData`/`setSize`, so it had not compiled in some time. The calls are
+      corrected and the file now says plainly why nothing builds it — it
+      drives a real `/dev/i2c-*` node — so the next reader does not mistake it
+      for coverage.
+
+      **Two ambitions are retired rather than finished.** Porting the three
+      drivers to Rust is the Phase 15 conclusion applied to `Drv`: I2C is a
+      pure `ioctl` veneer, UART is `termios` plus `read`/`write`, and GPIO is
+      `ioctl` plus `poll`. There is no decision content to move that is not
+      already extracted — the poll classifier above being the one piece there
+      was. And characterization tests for the *hardware* paths need a fake
+      gpiochip (`gpio-sim` configfs, root, kernel 5.17+) or an I2C device,
+      which is infrastructure this project does not have and should not build
+      to satisfy a roadmap line.
+
 - [x] **Phase 6 — Qualification hardening**: a safety lint posture enforced
       workspace-wide (`unsafe_op_in_unsafe_fn` and
       `clippy::undocumented_unsafe_blocks`, both denied and passing — every
@@ -102,7 +148,8 @@ mixed C++/Rust deployments working at every step.
       Safety-Critical Rust Consortium's coding guidelines have nothing to
       adopt yet: their `unsafety`, `ffi`, and `concurrency` chapters are
       empty
-- [~] **Phase 7 — partial: generated component glue.** `fpp_to_rust.py
+- [x] **Phase 7 — closed: generated component glue, and no hand-written C++
+      per component.** `fpp_to_rust.py
       --component` now generates, from a component's FPP model, the three
       layers that Phases 2/3/5 hand-wrote per component: a Rust handler trait,
       the `extern "C"` dispatch stubs, and the C++ shim that forwards each
@@ -113,12 +160,27 @@ mixed C++/Rust deployments working at every step.
       a per-type global, so multiple instances do not share state and no
       `static mut` is read unsynchronized.
 
-      **What this is not.** The phase's stated goal — "a component runs with
-      no per-component C++ at all" — is **not** met: the generated shim and a
-      hand-written component header are still per-component C++, and the
-      autocoded C++ base still owns ports, threading and all framework
-      plumbing. Nothing of the dispatch loop or queue consumption moved to
-      Rust.
+      **The component header is generated too**, which is what closes this
+      phase. It was the last hand-written C++ a Rust component had, and it was
+      pure restatement: every line derivable from the model, mirrored by hand
+      each time a port was added. Worse, it was a *silent* failure surface —
+      a handler declared in the header with one signature and defined in the
+      shim with another does not fail to compile, it becomes two functions,
+      and the port dispatches into the one nobody wrote. Both come from one
+      descriptor now, and `test_fpp_to_rust.py` checks they agree anyway.
+
+      `Svc/RustDemo` therefore has **no hand-written C++ at all**: the model,
+      the Rust implementation and a `CMakeLists.txt` are the whole component.
+      The four generated outputs are checked in (two of them are C++ the build
+      compiles), so `tools/fprime-rs/regen_component_glue.sh` records the
+      command that produces them and CI runs it with `--check` — the earlier
+      state, where the invocation and its non-obvious dependency list lived
+      nowhere, meant a model change could leave the glue stale indefinitely.
+
+      **What this is still not.** The phase's goal is met for *hand-written*
+      C++, not for C++ as such: the autocoded base still owns ports, threading
+      and all framework plumbing, and nothing of the dispatch loop or queue
+      consumption moved to Rust. Phase 16 is where that would change.
 
       *(The rest of this paragraph as first written has been overtaken and is
       corrected here rather than left standing, because the roadmap is the
@@ -126,12 +188,15 @@ mixed C++/Rust deployments working at every step.
       handling had not moved, and that the generator accepted only primitives
       and bools by value with no return type. Phases 12 and 13 changed three
       of those: events, telemetry and command responses cross today, and the
-      generator carries `ref` parameters, `Fw::Buffer` and FPP enums, and
-      return values. **Parameters remain the one that did not** — no
-      `ParamBuffer`, no `parameter` specifier support. The claim that
-      "essentially no existing framework component qualifies" is also no
-      longer true: running the generator's own port collection over all 75
-      `Fw`/`Svc`/`Drv` components accepts ten of them.)* The
+      generator carries `ref` parameters, `Fw::Buffer`, FPP enums as
+      parameters **and as return values**. **Parameters remain the one that
+      did not** — no `ParamBuffer`, no `parameter` specifier support. The
+      claim that "essentially no existing framework component qualifies" is
+      also no longer true, and the correction that replaced it — "accepts ten
+      of them" — has itself been overtaken: `tools/fprime-rs/port_coverage.py`
+      measures **22 of 76** today, including every Linux driver. Carrying a
+      component's ports is still not the same as running it; see the
+      handler-pointer problem under Phase 12.)* The
       hand-written shims from Phases 2, 3 and 5 were **not** retrofitted onto
       the generator
 - [x] **Phase 8 — closed as superseded.** The kernel flipped and works; what
@@ -503,7 +568,8 @@ Phases 1–9 verifiable and Phase 10 not.
       `Crc32Rust`, `MaxHeapRust` and `FilePathUtilsRust`, and none of the C++
       originals.
 
-- [~] **Phase 12 — partial: the two port shapes that matter most.** Counted
+- [x] **Phase 12 — closed: the generator carries every port shape that is
+      not a serialized object.** Counted
       across `Fw`, `Svc` and `Drv`, the framework's port definitions have
       **126 parameters across 67 ports. 48 are `ref`** and **25 are
       `Fw.Buffer`** — the two largest groups after primitives, and the
@@ -525,12 +591,52 @@ Phases 1–9 verifiable and Phase 10 not.
       original allocation, and letting Rust move the pointer would be a
       different contract than the class documents.
 
-      **Not done:** FPP structs and arrays as port parameters are still
-      refused, and so is the **handler-pointer problem** — the generated shim
-      calls `this->m_rustHandlers`, which an upstream component has no member
-      for, so a real component still cannot be wired without editing its
-      header. That is the remaining blocker for using any of this outside the
-      demo component.
+      **Enum return values** were the last shape missing, and they are the
+      shape most of the framework actually uses: `-> Drv.I2cStatus`,
+      `-> GpioStatus`, `-> Drv.SpiStatus`, `-> ByteStreamStatus`,
+      `-> Fw.TlmValid`, `-> ParamValid`, `-> Fw.Success`. An enum cannot cross
+      as an object — `fpp-to-cpp` emits it as a class deriving
+      `Fw::Serializable`, so it has a vtable — but its representation can, and
+      the shim rebuilds the object on the way back. Through
+      `Status(static_cast<Status::SerialType>(v))`, **never**
+      `static_cast<Status::T>(v)`: Rust can answer with any integer of the
+      representation, and casting one outside the enumeration straight to a
+      plain C++ enum is undefined behaviour. The SerialType constructor
+      asserts first, so a Rust handler that answers with nonsense faults where
+      it happened. (The same defect, and the same fix, as the command-response
+      and `ref`-enum write-back paths.) `tools/fprime-rs/test_fpp_to_rust.py`
+      pins the cast that must **not** appear as firmly as the one that must,
+      and the demo's `EnumReturnValueCrossesTheGeneratedBoundary` was checked
+      against a mutant: removing the Rust handler's clamp makes it fault at
+      `RustDemoKindEnumAc.hpp:81`, which is the assertion doing its job.
+
+      **What it measures out at.** `tools/fprime-rs/port_coverage.py` runs the
+      generator's own `port_signature` over every model in a configured build
+      and reports the result, so these numbers are reproducible rather than
+      remembered:
+
+      | | ports carried | components whose input ports all carry |
+      |---|---|---|
+      | before enum returns | 34/72 | 12/76 |
+      | after | **43/72** | **22/76** |
+
+      The 22 include `LinuxGpioDriver`, `LinuxI2cDriver`, `LinuxSpiDriver`,
+      `LinuxUartDriver`, `TcpClient`, `TcpServer`, `Udp`, `FileUplink`,
+      `FileManager`, `DpManager`, `DpWriter`, `BufferAccumulator` and
+      `Svc.Ccsds.ApidManager` — real drivers and services, not toys.
+
+      **Not done:** FPP structs, arrays and strings as port parameters are
+      still refused, and so are abstract types other than `Fw.Buffer`
+      (`Fw::Time`, `ComBuffer`, `ParamBuffer`, `Os::RawTime`) — 29 of the 72
+      ports, and `port_coverage.py --why` lists exactly which shape each one
+      needs. Refusals now name the type and the parameter; they used to say
+      "got named", which named neither. The **handler-pointer problem** also
+      stands: the generated shim calls `this->m_rustHandlers`, which an
+      upstream component has no member for, so *carrying a component's ports*
+      is not the same as *running it* — a real component still cannot be wired
+      without editing its header. That is the remaining blocker for using any
+      of this outside the demo component, and it is what the re-issued Phase
+      13 exit criterion below turns on.
 
 - [x] **Phase 13 — closed as superseded.** Commands, telemetry and events all
       cross. Its unmet exit criterion — one real in-tree component running on
@@ -1215,13 +1321,74 @@ Phases 1–9 verifiable and Phase 10 not.
       and the measured handle-size table above, which is the fact that decides
       the shape of any future attempt.
 
-- [ ] **Phase 16 — The component runtime** *(months — this is the project)*.
+- [~] **Phase 16 — The component runtime** *(months — this is the project)*.
       A Rust-native equivalent of `ActiveComponentBase`/`QueuedComponentBase`:
       one thread per active component, a bounded priority queue, the dispatch
       loop, port invocation, and the serialization of port arguments into
       queue messages. For Ref that is 21 threads, 21 queues, 13 mutexes.
       **Exit:** one active component runs end to end on the Rust runtime with
       C++ only at the topology edge. **Oracle:** that component's suite.
+
+      **Started with the queue, which is the one piece that was already
+      reachable.** Of the five things this phase names, four are blocked on
+      the autocoded C++ base: the thread, the dispatch loop, port invocation
+      and message serialization all live inside `ComponentAc`, which
+      `fpp-to-cpp` generates and which Phase 17 would have to replace. The
+      bounded priority queue is not — it is `Os::Generic::PriorityQueue`, an
+      OSAL class behind an interface, and
+      `cmake/platform/unix/Platform/CMakeLists.txt` selects it, so every
+      message every active component in a Linux or macOS deployment queues
+      goes through it.
+
+      That queue has exactly two data structures, and **both are now Rust**.
+      Its *ordering* — the stable max heap that decides which message comes
+      out next — moved in Phase 9. Its *allocation* moves here: the circular
+      list of free slot indices, and the flat slab those slots address
+      (`Rust/fprime-utils/src/queue_slots.rs`, behind
+      `FPRIME_RUST_IMPL_OS_PRIORITYQUEUE`, via a shim generated by
+      `tools/fprime-rs/gen_os_priorityqueue.py`). Between the two, **every
+      non-OS decision the framework's default message queue makes is in
+      Rust.**
+
+      What deliberately did not move: the allocation against
+      `Fw::MemAllocator`, the mutex, the two condition variables, the
+      blocking policy in `send`/`receive`, and every `FW_ASSERT`. Guards stay
+      in C++; only decisions cross — the rule since Phase 2.
+
+      **The ring cannot tell full from empty, and the port preserves that.**
+      `start == stop` means every slot is free *or* every slot is handed out;
+      there is no count that separates them. `send` and `receive` close the
+      gap by checking the heap's `isFull()`/`isEmpty()` first, so the heap's
+      size is the count. Adding a second count in Rust would have created two
+      sources of truth for one fact — and the one that already exists is the
+      one `getMessagesAvailable()` reports. It is mirrored, not fixed.
+
+      **Verified, and the verification was checked.** The oracle is the
+      existing `PriorityQueueTest` rules-based suite plus all 139 tests, which
+      pass in both switch positions. That it *discriminates* was established
+      by mutation: selecting the wrong slot in the Rust ring fails
+      `Random.RandomNominal`. A first mutation — dropping the wrap when the
+      cursor is stored — did **not** fail anything, and the reason is worth
+      recording: the cursor is taken modulo the depth on read as well as on
+      write, so the second modulo is dead in the C++ too. The mirror keeps it
+      anyway; the comment in `take()` says why, and cites the mutation as the
+      proof.
+
+      **Two upstream defects fixed on the way.** `PriorityQueue::send` wrote
+      `m_sizes[index]` immediately after `store_data` had already written it —
+      a second place that had to agree with the first. And
+      `PriorityQueue.hpp` declared `load_data`'s third parameter `capacity`
+      while the definition and the only call site treat it as the *stored*
+      length: passing a capacity would have copied whatever the slot's
+      previous message left behind, and the assertion inside only bounds it by
+      the slot width. The header now names it `size` and says so.
+
+      **What remains is the phase.** The four blocked items above, in the
+      order they unblock each other: generated Rust component bases (Phase
+      17), then port invocation and message serialization, then the dispatch
+      loop, then the thread. The exit criterion — one active component running
+      end to end on a Rust runtime — is untouched by this slice, which moves
+      the queue *under* the C++ runtime rather than replacing it.
 
 - [ ] **Phase 17 — Generate the component bases** *(months)*. Extend
       `fpp_to_rust` to emit what `fpp-to-cpp` emits for a component: the

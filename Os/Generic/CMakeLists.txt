@@ -40,16 +40,47 @@ register_fprime_ut(
 )
 
 #### Os/Generic/Queue Section ####
+# fprime-rs Phase 16: the queue's message-slot bookkeeping can run in Rust
+# (see Rust/enable.cmake). PriorityQueueRust.cpp is generated from
+# PriorityQueue.cpp by tools/fprime-rs/gen_os_priorityqueue.py.
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_OS_PRIORITYQUEUE)
+    set(FPRIME_PRIORITYQUEUE_IMPL "${CMAKE_CURRENT_LIST_DIR}/PriorityQueueRust.cpp")
+else()
+    set(FPRIME_PRIORITYQUEUE_IMPL "${CMAKE_CURRENT_LIST_DIR}/PriorityQueue.cpp")
+endif()
+
 register_fprime_module(
     Os_Generic_PriorityQueue_Implementation
   SOURCES
-    "${CMAKE_CURRENT_LIST_DIR}/PriorityQueue.cpp"
+    "${FPRIME_PRIORITYQUEUE_IMPL}"
   HEADERS
     "${CMAKE_CURRENT_LIST_DIR}/PriorityQueue.hpp"
   DEPENDS
     Fw_Types
     Os_Generic_Types
 )
+
+if (FPRIME_RS_AVAILABLE AND FPRIME_RUST_IMPL_OS_PRIORITYQUEUE AND NOT FPRIME_IS_SUB_BUILD)
+    target_link_libraries(Os_Generic_PriorityQueue_Implementation PUBLIC fprime_rust)
+
+    # PriorityQueueRust.cpp is a generated near-copy of PriorityQueue.cpp;
+    # verify on every build that it is still what the generator produces, so
+    # an upstream edit cannot silently fail to reach the Rust build.
+    add_custom_command(
+        OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/PriorityQueueRust.verified"
+        COMMAND "${PYTHON}" "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_os_priorityqueue.py" "--check"
+        COMMAND "${CMAKE_COMMAND}" "-E" "touch" "${CMAKE_CURRENT_BINARY_DIR}/PriorityQueueRust.verified"
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/PriorityQueue.cpp"
+                "${CMAKE_CURRENT_LIST_DIR}/PriorityQueueRust.cpp"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/gen_os_priorityqueue.py"
+                "${FPRIME_FRAMEWORK_PATH}/tools/fprime-rs/shimgen.py"
+        COMMENT "[rust] Verifying the Rust-backed priority queue matches PriorityQueue.cpp"
+        VERBATIM
+    )
+    add_custom_target(Os_Generic_PriorityQueue_rust_verify
+                      DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/PriorityQueueRust.verified")
+    add_dependencies(Os_Generic_PriorityQueue_Implementation Os_Generic_PriorityQueue_rust_verify)
+endif()
 register_fprime_implementation(
     Os_Generic_PriorityQueue
   SOURCES
