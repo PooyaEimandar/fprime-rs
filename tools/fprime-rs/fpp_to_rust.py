@@ -1287,6 +1287,17 @@ def main():
 # which is a different design than this glue implements. Guessing at that
 # marshalling would produce plausible-but-wrong glue, so the generator stops
 # instead, naming the type and the parameter it stopped on.
+#
+# KNOWN GAP, reachable today: an enum type is emitted with the C++ spelling
+# the FPP *reference* used, not with the enum's own qualified name. When a
+# port definition in module A names an enum declared in A without qualifying
+# it, and a component in module B uses that port, the shim and header land in
+# `namespace B` carrying a bare `Status` that does not resolve there. It fails
+# as a compile error rather than silently, which is why it is recorded here
+# rather than guessed around -- but it IS a gap, and port_coverage.py counts
+# such components as generated because the generator itself does not refuse
+# them. Fixing it means resolving each enum's defining module path from the
+# AST instead of trusting the reference spelling.
 
 
 PORT_KIND_SYNC = "SyncInput"

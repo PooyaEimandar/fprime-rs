@@ -194,9 +194,8 @@ mixed C++/Rust deployments working at every step.
       claim that "essentially no existing framework component qualifies" is
       also no longer true, and the correction that replaced it — "accepts ten
       of them" — has itself been overtaken: `tools/fprime-rs/port_coverage.py`
-      measures **22 of 76** today, including every Linux driver. Carrying a
-      component's ports is still not the same as running it; see the
-      handler-pointer problem under Phase 12.)* The
+      measures **14 of 76** today. Carrying a component's ports is still not
+      the same as running it; see the handler-pointer problem under Phase 12.)* The
       hand-written shims from Phases 2, 3 and 5 were **not** retrofitted onto
       the generator
 - [x] **Phase 8 — closed as superseded.** The kernel flipped and works; what
@@ -615,15 +614,25 @@ Phases 1–9 verifiable and Phase 10 not.
       and reports the result, so these numbers are reproducible rather than
       remembered:
 
-      | | ports carried | components whose input ports all carry |
+      | | ports carried | components fully generated |
       |---|---|---|
-      | before enum returns | 34/72 | 12/76 |
-      | after | **43/72** | **22/76** |
+      | before enum returns | 34/72 | 8/76 |
+      | after | **43/72** | **14/76** |
 
-      The 22 include `LinuxGpioDriver`, `LinuxI2cDriver`, `LinuxSpiDriver`,
-      `LinuxUartDriver`, `TcpClient`, `TcpServer`, `Udp`, `FileUplink`,
-      `FileManager`, `DpManager`, `DpWriter`, `BufferAccumulator` and
-      `Svc.Ccsds.ApidManager` — real drivers and services, not toys.
+      The 14 include `LinuxI2cDriver`, `TcpClient`, `TcpServer`, `Udp`,
+      `DpManager`, `BufferAccumulator`, `BufferRepeater`, `SystemResources`
+      and `Svc.Ccsds.ApidManager` — real drivers and services, not toys.
+
+      *(The component column said 12/76 → 22/76 when first written, and named
+      `LinuxGpioDriver` among the carried. Both were wrong, and wrong in a way
+      worth recording: `port_coverage.py` measured only `collect_ports()`,
+      while `emit_component()` ALSO runs every command, event and telemetry
+      channel through the same `described_type()`. Eight components whose
+      input ports all carry still fail in component mode —
+      `--component LinuxGpioDriver` exits 1 on a command parameter. A number
+      quoted as "components the generator carries" has to mean "components the
+      generator generates", so the tool now runs both halves and the figures
+      above are measured with it. The port column was unaffected.)*
 
       **Not done:** FPP structs, arrays and strings as port parameters are
       still refused, and so are abstract types other than `Fw.Buffer`

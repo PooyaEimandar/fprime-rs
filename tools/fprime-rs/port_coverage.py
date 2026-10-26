@@ -71,13 +71,24 @@ def main():
     print(f"ports:      {len(carried)}/{total} carried")
 
     # --- components ---------------------------------------------------------
+    #
+    # Both halves of what the generator actually does, not just the ports.
+    # Measuring collect_ports() alone overstated this badly: eight components
+    # whose input ports all carry still fail in component mode, because
+    # emit_component() also runs every command, event and telemetry channel
+    # through the same described_type(). LinuxGpioDriver was the clearest
+    # case -- all four of its ports carry, and `--component LinuxGpioDriver`
+    # exits 1 on a command parameter. A number quoted as "components the
+    # generator carries" has to mean "components the generator generates".
     whole, partial = [], []
     for entry in analysis.get("componentMap", {}).values():
-        component = G.component_ast_name(ast, entry["aNode"]["astNodeId"])
+        node_id = entry["aNode"]["astNodeId"]
+        component = G.component_ast_name(ast, node_id)
         if component is None:
             continue
         try:
             ports = G.collect_ports(ast, analysis, component, component)
+            G.collect_component_specs(node_id, ast, analysis, component)
         except G.GeneratorError:
             partial.append(component)
             continue
@@ -85,7 +96,7 @@ def main():
         # candidate either: there would be nothing for Rust to answer.
         (whole if ports else partial).append(component)
 
-    print(f"components: {len(whole)}/{len(whole) + len(partial)} fully carried")
+    print(f"components: {len(whole)}/{len(whole) + len(partial)} fully generated")
     for component in sorted(whole):
         print(f"  + {component}")
 
