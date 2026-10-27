@@ -12,8 +12,9 @@
 //!
 //! **Not NUL-terminated.** The C++ keeps a terminator because its accessors
 //! hand out a `const char*`; nothing here does, so the length is the length
-//! and there is no reserved byte. `BUFFER_SIZE(N)` in the C++ is `N + 1` for
-//! exactly that reason, and it is not this type's concern.
+//! and there is no reserved byte. The logical content still ends at the first
+//! NUL, matching the C++ string accessors; any remaining wire bytes are consumed
+//! during deserialization but do not become string content.
 
 use crate::{DeserReader, Endianness, LengthMode, SerBuffer, SerError, SerResult};
 use fprime_config::FwSizeStoreType;
@@ -58,13 +59,16 @@ impl<const N: usize> FwString<N> {
         self.length == 0
     }
 
-    /// Build from bytes, truncating at the capacity.
+    /// Build from bytes, stopping at the first NUL or the capacity.
     ///
     /// Truncation rather than refusal, because that is what the C++ does:
     /// `ConstStringBase::serializeTo` writes `min(maxLength, length())` and
     /// `Fw::StringUtils::string_copy` truncates rather than overflowing.
     pub fn from_bytes(source: &[u8]) -> Self {
-        let length = source.len().min(N);
+        let length = source[..source.len().min(N)]
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(source.len().min(N));
         let mut bytes = [0; N];
         bytes[..length].copy_from_slice(&source[..length]);
         Self { length, bytes }
@@ -102,6 +106,12 @@ impl<const N: usize> FwString<N> {
         if length > N {
             return Err(SerError::SizeMismatch);
         }
+        let length = bytes[..length]
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(length);
+        // Canonicalize unused storage so derived equality compares logical strings.
+        bytes[length..].fill(0);
         Ok(Self { length, bytes })
     }
 }
@@ -201,5 +211,33 @@ mod tests {
             FwString::<16>::deserialize_from(&mut reader, Endianness::Big),
             Err(SerError::SizeMismatch)
         );
+    }
+    #[test]
+    fn embedded_nul_matches_cpp_and_consumes_the_entire_wire_field() {
+        for wire in [
+            &[0, 3, b'a', 0, b'b', 42][..],
+            &[0, 3, 0, b'a', b'b', 42][..],
+        ] {
+            let mut reader = DeserReader::new(wire);
+            let value = FwString::<8>::deserialize_from(&mut reader, Endianness::Big).unwrap();
+            let expected = FwString::<8>::from_bytes(&wire[2..5]);
+            assert_eq!(value, expected);
+            assert_eq!(reader.deser_u8(Endianness::Big).unwrap(), 42);
+            let mut storage = [0xaa; 16];
+            let mut out = SerBuffer::new(&mut storage);
+            value.serialize_to(&mut out, Endianness::Big).unwrap();
+            if wire[2] == 0 {
+                assert!(value.is_empty());
+                assert_eq!(out.as_bytes(), &[0, 0]);
+            } else {
+                assert_eq!(value.as_bytes(), b"a");
+                assert_eq!(out.as_bytes(), &[0, 1, b'a']);
+            }
+        }
+        assert_eq!(
+            FwString::<8>::from_bytes(b"a\0b"),
+            FwString::<8>::from_bytes(b"a")
+        );
+        assert_eq!(FwString::<0>::from_bytes(b"\0"), FwString::<0>::default());
     }
 }

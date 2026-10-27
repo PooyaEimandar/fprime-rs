@@ -173,6 +173,10 @@ SocketIpStatus UdpSocket::openProtocol(SocketDescriptor& socketDescriptor) {
 
         static_assert(sizeof(m_addr_send) == sizeof(address), "Send address must match the local address structure");
         (void)memcpy(&this->m_addr_send, &address, sizeof(this->m_addr_send));
+    } else {
+        // A learned peer belongs to this open socket, not its configuration.
+        // Reopening a receive-only socket must learn its peer again.
+        (void)::memset(&this->m_addr_send, 0, sizeof(this->m_addr_send));
     }
 
     // Only bind if configureRecv was called (including ephemeral)
@@ -242,8 +246,7 @@ FwSignedSizeType UdpSocket::recvProtocol(const SocketDescriptor& socketDescripto
     // If we have not configured a send port, set it to the source of the last received packet
     if (received >= 0 && this->m_addr_send.sin_port == 0) {
         this->m_addr_send = sender_addr;
-        this->m_port = ntohs(sender_addr.sin_port);
-        Fw::Logger::log("Configured send port to %hu as specified by the last received packet.\n", this->m_port);
+        Fw::Logger::log("Learned send port %hu from the received packet.\n", ntohs(sender_addr.sin_port));
     }
     return received;
 }

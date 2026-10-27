@@ -31,6 +31,7 @@ compile_error!(
      it exists so `cargo test -p fprime-ffi --features test-std` can link the test harness"
 );
 
+use fprime_core::output::OutputBytes;
 use fprime_core::{status_code, DeserReader, Endianness, LengthMode, SerBuffer};
 
 #[cfg(not(feature = "test-std"))]
@@ -70,16 +71,20 @@ unsafe fn view<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-/// Mutable counterpart of [`view`].
+/// Write-only view over caller storage; unused bytes need not be initialized.
 ///
 /// # Safety
-/// When `len > 0`, `ptr` must point to `len` writable bytes.
-unsafe fn view_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
-    if len == 0 {
+/// When `len > 0`, `ptr` must point to `len` exclusively writable bytes in
+/// one allocation, with no overlapping live references for the borrow.
+unsafe fn output<'a>(ptr: *mut u8, len: usize) -> OutputBytes<'a> {
+    let storage = if len == 0 {
         &mut []
     } else {
-        core::slice::from_raw_parts_mut(ptr, len)
-    }
+        // SAFETY: the caller provides writable storage; MaybeUninit does not
+        // require that any byte has been written before this borrow.
+        unsafe { core::slice::from_raw_parts_mut(ptr.cast(), len) }
+    };
+    OutputBytes::uninit(storage)
 }
 
 fn endianness(mode: i32) -> Endianness {
@@ -112,7 +117,7 @@ macro_rules! ffi_codec {
             capacity: usize,
             written: *mut usize,
         ) -> i32 {
-            let mut buf = SerBuffer::new(view_mut(out, capacity));
+            let mut buf = SerBuffer::from_output(output(out, capacity));
             let result = buf.$ser(value, endianness(mode));
             *written = buf.len();
             status_code(&result)
@@ -275,8 +280,8 @@ pub unsafe extern "C" fn fprime_rs_deser_bytes(
     out_len: *mut usize,
 ) -> i32 {
     let mut reader = DeserReader::new(view(bytes, len));
-    let dst = view_mut(out, out_capacity);
-    match reader.deser_bytes(dst, LengthMode::IncludeLength, endianness(mode)) {
+    let dst = output(out, out_capacity);
+    match reader.deser_bytes_output(dst, LengthMode::IncludeLength, endianness(mode)) {
         Ok(n) => {
             *out_len = n;
             0
@@ -313,14 +318,14 @@ const _: () = assert!(core::mem::size_of::<usize>() >= core::mem::size_of::<FwSi
 /// `alloc`, `high` point to the object's index/size fields. Preconditions
 /// (setup called, non-null buffers) are FW_ASSERTed by the C++ shim.
 unsafe fn ring_mut<'a>(
-    store: *mut u8,
+    _store: *mut u8,
     store_size: FwSizeType,
     head: *mut FwSizeType,
     alloc: *mut FwSizeType,
     high: *mut FwSizeType,
-) -> circular::RingMut<'a> {
-    circular::RingMut {
-        store: view_mut(store, store_size as usize),
+) -> circular::RingState<'a> {
+    circular::RingState {
+        store_size,
         head_idx: &mut *head,
         allocated_size: &mut *alloc,
         high_water_mark: &mut *high,
@@ -431,7 +436,8 @@ pub unsafe extern "C" fn fprime_rs_cb_peek_bytes(
 /// Mirrors `CircularBuffer::peek(U8&, FwSizeType)`.
 ///
 /// # Safety
-/// `store` must point to `store_size` readable bytes; `value` must be valid.
+/// `store` must hold `store_size` bytes, with the allocated ring region
+/// initialized; `value` must be a valid, disjoint writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_cb_peek_u8(
     store: *const u8,
@@ -441,14 +447,23 @@ pub unsafe extern "C" fn fprime_rs_cb_peek_u8(
     offset: FwSizeType,
     value: *mut u8,
 ) -> i32 {
-    let ring = circular::RingRef {
-        store: view(store, store_size as usize),
-        head_idx: head,
-        allocated_size: alloc,
+    let mut bytes = [0u8; 1];
+    // SAFETY: the allocated ring region is initialized by the caller; the
+    // existing peek routine checks availability and only reads that region.
+    let result = unsafe {
+        circular::peek_bytes_overlapping(
+            store,
+            store_size,
+            head,
+            alloc,
+            offset,
+            bytes.as_mut_ptr(),
+            1,
+        )
     };
-    match ring.peek_u8(offset) {
-        Ok(v) => {
-            *value = v;
+    match result {
+        Ok(()) => {
+            *value = bytes[0];
             0
         }
         Err(e) => e.code(),
@@ -458,7 +473,8 @@ pub unsafe extern "C" fn fprime_rs_cb_peek_u8(
 /// Mirrors `CircularBuffer::peek(U32&, FwSizeType)` (big-endian).
 ///
 /// # Safety
-/// `store` must point to `store_size` readable bytes; `value` must be valid.
+/// `store` must hold `store_size` bytes, with the allocated ring region
+/// initialized; `value` must be a valid, disjoint writable pointer.
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_cb_peek_u32(
     store: *const u8,
@@ -468,14 +484,23 @@ pub unsafe extern "C" fn fprime_rs_cb_peek_u32(
     offset: FwSizeType,
     value: *mut u32,
 ) -> i32 {
-    let ring = circular::RingRef {
-        store: view(store, store_size as usize),
-        head_idx: head,
-        allocated_size: alloc,
+    let mut bytes = [0u8; 4];
+    // SAFETY: the allocated ring region is initialized by the caller; the
+    // existing peek routine checks availability and only reads that region.
+    let result = unsafe {
+        circular::peek_bytes_overlapping(
+            store,
+            store_size,
+            head,
+            alloc,
+            offset,
+            bytes.as_mut_ptr(),
+            4,
+        )
     };
-    match ring.peek_u32(offset) {
-        Ok(v) => {
-            *value = v;
+    match result {
+        Ok(()) => {
+            *value = u32::from_be_bytes(bytes);
             0
         }
         Err(e) => e.code(),
@@ -585,12 +610,12 @@ pub unsafe extern "C" fn fprime_rs_framer_frame(
     written: *mut FwSizeType,
 ) -> i32 {
     let payload = view(payload, payload_len as usize);
-    let result = framer::frame(payload, |size| {
+    let result = framer::frame_output(payload, |size| {
         let view = alloc(ctx, size);
         if view.ptr.is_null() {
             None
         } else {
-            Some(view_mut(view.ptr, view.len as usize))
+            Some(output(view.ptr, view.len as usize))
         }
     });
     match result {
@@ -798,7 +823,7 @@ pub unsafe extern "C" fn fprime_rs_gen_frameheader_ser(
         startWord: start_word,
         lengthField: length_field,
     };
-    let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+    let mut buf = SerBuffer::from_output(output(out, capacity as usize));
     let result = value.serialize_to(&mut buf, endianness(mode));
     *written = buf.len() as FwSizeType;
     status_code(&result)
@@ -842,7 +867,7 @@ pub unsafe extern "C" fn fprime_rs_gen_frametrailer_ser(
     let value = gen_proto::SvcFprimeProtocolFrameTrailer {
         crcField: crc_field,
     };
-    let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+    let mut buf = SerBuffer::from_output(output(out, capacity as usize));
     let result = value.serialize_to(&mut buf, endianness(mode));
     *written = buf.len() as FwSizeType;
     status_code(&result)
@@ -901,7 +926,7 @@ pub unsafe extern "C" fn fprime_rs_gen_test_default(
     written: *mut FwSizeType,
 ) -> i32 {
     gen_test_dispatch!(type_id, T, {
-        let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+        let mut buf = SerBuffer::from_output(output(out, capacity as usize));
         let result = T::default().serialize_to(&mut buf, endianness(mode));
         *written = buf.len() as FwSizeType;
         status_code(&result)
@@ -929,7 +954,7 @@ pub unsafe extern "C" fn fprime_rs_gen_test_roundtrip(
         let mut reader = DeserReader::new(view(bytes, len as usize));
         match T::deserialize_from(&mut reader, endianness(mode)) {
             Ok(value) => {
-                let mut buf = SerBuffer::new(view_mut(out, capacity as usize));
+                let mut buf = SerBuffer::from_output(output(out, capacity as usize));
                 let result = value.serialize_to(&mut buf, endianness(mode));
                 *written = buf.len() as FwSizeType;
                 status_code(&result)
@@ -1077,36 +1102,42 @@ pub extern "C" fn fprime_rs_rustdemo_total() -> u32 {
 // through the unsigned primitives below, so these ten entry points carry every
 // serialization in the framework.
 
-use fprime_core::{Cursor, Reader};
+use fprime_core::{Reader, SerResult};
 
-/// Borrow a C++ LinearBufferBase's state for one operation.
+/// Serialize into a C++ buffer's unused suffix, preserving existing bytes.
 ///
 /// # Safety
-/// `data` must point to `capacity` writable bytes; `ser_loc` and `deser_loc`
-/// must be valid pointers to the object's cursors, distinct from the storage.
-unsafe fn cursor<'a>(
+/// `data` points to `capacity` writable bytes; the two cursors are valid,
+/// distinct initialized objects that do not overlap the storage.
+unsafe fn write_cursor(
     data: *mut u8,
     capacity: FwSizeType,
     ser_loc: *mut FwSizeType,
     deser_loc: *mut FwSizeType,
-) -> Cursor<'a> {
-    // The C++ primitives each asserted `buffAddr != nullptr` before touching
-    // storage; keep that defense here, or a null pointer with a non-zero
-    // capacity would become UB instead of an assert. `ExternalSerializeBuffer`
-    // already rejects that pairing in `setExtBuffer`, so this is unreachable
-    // in a well-formed object -- which is exactly why it is worth asserting.
+    write: impl FnOnce(&mut SerBuffer<'_>) -> SerResult,
+) -> SerResult {
     assert!(
         !data.is_null() || capacity == 0,
         "LinearBufferBase storage is null with non-zero capacity"
     );
-    Cursor {
-        // SAFETY: `capacity` writable bytes at `data`, non-null per the assert.
-        data: unsafe { view_mut(data, capacity as usize) },
-        // SAFETY: the caller guarantees these point at the object's cursors.
-        ser_loc: unsafe { &mut *ser_loc },
-        // SAFETY: as above.
-        deser_loc: unsafe { &mut *deser_loc },
+    // SAFETY: the caller guarantees valid cursor pointers.
+    let at = unsafe { *ser_loc };
+    if at > capacity {
+        return Err(fprime_core::SerError::NoRoomLeft);
     }
+    // SAFETY: the suffix is within the caller's exclusively writable storage.
+    // wrapping_add permits the null/zero-capacity case without dereferencing it.
+    let region = unsafe { output(data.wrapping_add(at as usize), (capacity - at) as usize) };
+    let mut buffer = SerBuffer::from_output(region);
+    let result = write(&mut buffer);
+    if result.is_ok() {
+        // SAFETY: these are the object's distinct writable cursors.
+        unsafe {
+            *ser_loc += buffer.len() as FwSizeType;
+            *deser_loc = 0;
+        }
+    }
+    result
 }
 
 /// Borrow a C++ LinearBufferBase's state for one *read*.
@@ -1128,7 +1159,7 @@ unsafe fn reader<'a>(
 ) -> Reader<'a> {
     // SAFETY: the caller guarantees this points at the object's write cursor.
     let written = unsafe { *ser_loc }.min(capacity) as usize;
-    // As in `cursor`: the C++ primitives asserted a non-null buffer before
+    // As in `write_cursor`: the C++ primitives asserted a non-null buffer before
     // touching storage, and a null pointer with bytes to read is UB.
     assert!(
         !data.is_null() || written == 0,
@@ -1147,7 +1178,7 @@ macro_rules! lbb_int {
         /// Mirrors `Fw::LinearBufferBase::serializeFrom` for this type.
         ///
         /// # Safety
-        /// See [`cursor`].
+        /// See [`write_cursor`].
         #[no_mangle]
         pub unsafe extern "C" fn $ser_name(
             data: *mut u8,
@@ -1158,8 +1189,11 @@ macro_rules! lbb_int {
             mode: i32,
         ) -> i32 {
             // SAFETY: forwarded from the C++ object that owns this state.
-            let mut cursor = unsafe { cursor(data, capacity, ser_loc, deser_loc) };
-            status_code(&cursor.$ser(value, endianness(mode)))
+            status_code(&unsafe {
+                write_cursor(data, capacity, ser_loc, deser_loc, |buf| {
+                    buf.$ser(value, endianness(mode))
+                })
+            })
         }
 
         /// Mirrors `Fw::LinearBufferBase::deserializeTo` for this type.
@@ -1214,7 +1248,7 @@ lbb_int!(
 /// Mirrors `Fw::LinearBufferBase::serializeFrom(U8)`.
 ///
 /// # Safety
-/// See [`cursor`].
+/// See [`write_cursor`].
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_lbb_ser_u8(
     data: *mut u8,
@@ -1224,8 +1258,11 @@ pub unsafe extern "C" fn fprime_rs_lbb_ser_u8(
     value: u8,
 ) -> i32 {
     // SAFETY: forwarded from the C++ object that owns this state.
-    let mut cursor = unsafe { cursor(data, capacity, ser_loc, deser_loc) };
-    status_code(&cursor.ser_u8(value))
+    status_code(&unsafe {
+        write_cursor(data, capacity, ser_loc, deser_loc, |buf| {
+            buf.ser_u8(value, Endianness::Big)
+        })
+    })
 }
 
 /// Mirrors `Fw::LinearBufferBase::deserializeTo(U8&)`.
@@ -1255,7 +1292,7 @@ pub unsafe extern "C" fn fprime_rs_lbb_deser_u8(
 /// Mirrors `Fw::LinearBufferBase::serializeFrom(bool)`.
 ///
 /// # Safety
-/// See [`cursor`].
+/// See [`write_cursor`].
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_lbb_ser_bool(
     data: *mut u8,
@@ -1265,8 +1302,11 @@ pub unsafe extern "C" fn fprime_rs_lbb_ser_bool(
     value: bool,
 ) -> i32 {
     // SAFETY: forwarded from the C++ object that owns this state.
-    let mut cursor = unsafe { cursor(data, capacity, ser_loc, deser_loc) };
-    status_code(&cursor.ser_bool(value))
+    status_code(&unsafe {
+        write_cursor(data, capacity, ser_loc, deser_loc, |buf| {
+            buf.ser_bool(value, Endianness::Big)
+        })
+    })
 }
 
 /// Mirrors `Fw::LinearBufferBase::deserializeTo(bool&)`.
@@ -1592,7 +1632,7 @@ pub unsafe extern "C" fn fprime_rs_maxheap_node_layout(
 // these only while holding that handle's `m_data_lock`, so nothing below
 // needs synchronization of its own.
 
-use fprime_utils::queue_slots::{SlotRing, SlotStore};
+use fprime_utils::queue_slots::{self, SlotRing};
 
 /// Borrow a handle's free-index ring for one operation.
 ///
@@ -1625,40 +1665,24 @@ unsafe fn slot_ring<'a>(
     }
 }
 
-/// Borrow a handle's message slab for one operation.
-///
-/// # Safety
-/// `data` must point to `depth * max_size` writable bytes and `sizes` to
-/// `depth` initialized `FwSizeType`s. `depth` may be zero, in which case both
-/// may be null.
-unsafe fn slot_store<'a>(
+/// Validate a queue slot without borrowing the uninitialized message slab.
+fn slot_offset(
     data: *mut u8,
     sizes: *mut FwSizeType,
     depth: FwSizeType,
     max_size: FwSizeType,
-) -> SlotStore<'a> {
+    index: FwSizeType,
+    size: FwSizeType,
+) -> usize {
     assert!(
         (!data.is_null() && !sizes.is_null()) || depth == 0,
         "queue storage is null with non-zero depth"
     );
-    let bytes = (depth as usize)
-        .checked_mul(max_size as usize)
-        .expect("queue slab size overflows a pointer");
-    SlotStore {
-        data: if depth == 0 {
-            &mut []
-        } else {
-            // SAFETY: the caller guarantees `depth * max_size` bytes at `data`.
-            unsafe { core::slice::from_raw_parts_mut(data, bytes) }
-        },
-        sizes: if depth == 0 {
-            &mut []
-        } else {
-            // SAFETY: the caller guarantees `depth` entries at `sizes`.
-            unsafe { core::slice::from_raw_parts_mut(sizes, depth as usize) }
-        },
-        max_size,
-    }
+    assert!(
+        size <= max_size,
+        "message is larger than the queue's message size"
+    );
+    queue_slots::slot_span(depth as usize, max_size, index).0
 }
 
 /// Fill the free-index ring with every slot and rewind both cursors.
@@ -1715,7 +1739,9 @@ pub unsafe extern "C" fn fprime_rs_queue_slots_give(
 /// `PriorityQueueHandle::store_data`: copy a message into a slot.
 ///
 /// # Safety
-/// See [`slot_store`]; `source` must point to `size` readable bytes.
+/// `data` holds `depth * max_size` writable bytes, `sizes` holds `depth`
+/// initialized entries, and `source` holds `size` initialized readable bytes.
+/// The source and destination ranges must not overlap (as for C++ memcpy).
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_queue_slots_store(
     data: *mut u8,
@@ -1730,15 +1756,14 @@ pub unsafe extern "C" fn fprime_rs_queue_slots_store(
         !source.is_null() || size == 0,
         "queue message is null with non-zero size"
     );
-    // SAFETY: forwarded from the handle that owns this state.
-    let mut store = unsafe { slot_store(data, sizes, depth, max_size) };
-    let message = if size == 0 {
-        &[][..]
-    } else {
-        // SAFETY: the caller guarantees `size` readable bytes at `source`.
-        unsafe { core::slice::from_raw_parts(source, size as usize) }
-    };
-    store.store(index, message);
+    let offset = slot_offset(data, sizes, depth, max_size, index, size);
+    if size > 0 {
+        // SAFETY: the checked slot range holds the message; the caller promises
+        // readable source bytes and disjoint, writable destination storage.
+        unsafe { core::ptr::copy_nonoverlapping(source, data.add(offset), size as usize) };
+    }
+    // SAFETY: index was checked against depth; sizes is initialized and writable.
+    unsafe { *sizes.add(index as usize) = size };
 }
 
 /// `PriorityQueueHandle::load_data`: copy a stored message out.
@@ -1748,7 +1773,9 @@ pub unsafe extern "C" fn fprime_rs_queue_slots_store(
 /// whatever the slot's previous message left behind.
 ///
 /// # Safety
-/// See [`slot_store`]; `destination` must point to `size` writable bytes.
+/// `data` holds `depth * max_size` bytes; the first `sizes[index]` bytes of
+/// this slot are initialized. `sizes` holds `depth` initialized entries and
+/// `destination` holds `size` writable bytes, disjoint from the stored message.
 #[no_mangle]
 pub unsafe extern "C" fn fprime_rs_queue_slots_load(
     data: *mut u8,
@@ -1763,14 +1790,15 @@ pub unsafe extern "C" fn fprime_rs_queue_slots_load(
         !destination.is_null() || size == 0,
         "queue destination is null with non-zero size"
     );
-    // SAFETY: forwarded from the handle that owns this state.
-    let store = unsafe { slot_store(data, sizes, depth, max_size) };
-    if size == 0 {
-        return;
+    let offset = slot_offset(data, sizes, depth, max_size, index, size);
+    // SAFETY: index was checked against depth and sizes contains initialized entries.
+    let stored_size = unsafe { *sizes.add(index as usize) };
+    assert!(size <= stored_size, "read exceeds stored message");
+    if size > 0 {
+        // SAFETY: only the initialized message prefix is read, into the caller's
+        // disjoint writable output. No Rust reference covers unused slab bytes.
+        unsafe { core::ptr::copy_nonoverlapping(data.add(offset), destination, size as usize) };
     }
-    // SAFETY: the caller guarantees `size` writable bytes at `destination`.
-    let out = unsafe { core::slice::from_raw_parts_mut(destination, size as usize) };
-    store.load(index, out);
 }
 
 // ---------------------------------------------------------------------------
@@ -1845,8 +1873,8 @@ pub unsafe extern "C" fn fprime_rs_path_resolve(
     let base = unsafe { c_str(base, limit) };
     assert!(!out.is_null(), "resolvePath output buffer is null");
     // SAFETY: the caller guarantees `out_size` writable bytes at `out`.
-    let out = unsafe { view_mut(out, out_size as usize) };
-    path::resolve_path(path, base, out, max_path).code()
+    let out = unsafe { output(out, out_size as usize) };
+    path::resolve_path_output(path, base, out, max_path).code()
 }
 
 /// `Os::FilePathUtils::checkContainment(const char*, const char*)`.
@@ -2129,8 +2157,8 @@ pub unsafe extern "C" fn fprime_rs_string_copy(
     // SAFETY: `length` bytes were just proven readable by the scan above.
     let source = unsafe { core::slice::from_raw_parts(source, length) };
     // SAFETY: the caller guarantees `num` writable bytes at `destination`.
-    let destination = unsafe { view_mut(destination, n) };
-    strings::string_copy(destination, source, n) as FwSizeType
+    let destination = unsafe { output(destination, n) };
+    strings::string_copy_output(destination, source, n) as FwSizeType
 }
 
 /// `Fw::StringUtils::substring_find`: first match, or -1.
@@ -2187,20 +2215,192 @@ pub unsafe extern "C" fn fprime_rs_substring_find_last(
 }
 
 // ---------------------------------------------------------------------------
-// Boundary tests
+// Os::RawTime arithmetic (Phase 15)
 // ---------------------------------------------------------------------------
 //
-// Deliberately narrow. The C++ unit suites already exercise every entry point
-// here through its real callers, and Rust/test/differential compares
-// Fw::StringUtils against the C++ original exhaustively -- both stronger
-// oracles than anything hand-written here could be.
+// The first Os arithmetic to move. Deliberately not the clock: `now()` is a
+// clock_gettime call whose failure is read from errno, and errno is
+// thread-local and clobbered by the next failing call, so the syscall and its
+// errno read must stay together in C++. Four integers cross; no operating
+// system does.
+
+use fprime_core::raw_time::{self, Instant};
+
+/// `PosixRawTime::getTimeInterval`, as (seconds, microseconds).
+///
+/// Takes the two `timespec` fields of each instant rather than a struct: a
+/// `timespec`'s layout is the platform's, not ours, and there is nothing to
+/// gain by mirroring it when the whole payload is four integers.
+///
+/// # Safety
+/// Both out-parameters must point to writable `u32`s.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_rawtime_interval(
+    a_seconds: i64,
+    a_nanoseconds: i64,
+    b_seconds: i64,
+    b_nanoseconds: i64,
+    out_seconds: *mut u32,
+    out_useconds: *mut u32,
+) {
+    let (seconds, useconds) = raw_time::interval(
+        Instant {
+            seconds: a_seconds,
+            nanoseconds: a_nanoseconds,
+        },
+        Instant {
+            seconds: b_seconds,
+            nanoseconds: b_nanoseconds,
+        },
+    );
+    // SAFETY: the caller guarantees both pointers are writable.
+    unsafe {
+        *out_seconds = seconds;
+        *out_useconds = useconds;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generated-type serialization, for the differential oracle
+// ---------------------------------------------------------------------------
 //
-// What neither of those can reach is the degenerate pointer cases, because the
-// C++ shims assert on them before Rust is ever called: a null pointer, a zero
-// length, an unterminated string. Those contracts are stated in the `# Safety`
-// docs above and are otherwise checked by nothing. That is what this covers.
+// Every file the type generator emits carries the line "Serialization is
+// byte-identical to the C++ code FPP autocodes for the same model; the
+// differential unit test is the proof." These entry points are what make that
+// sentence true rather than merely intended: Rust/test/differential builds the
+// same values with the autocoded C++ types and compares the bytes.
 //
-// Requires `--features test-std`; see Cargo.toml for why.
+// They exist for the test and nothing else, which is why they take the fields
+// individually instead of a mirrored struct -- the point is to drive the
+// generated code from outside without trusting a layout that is not part of
+// any contract.
+
+use fprime_svc::generated::com_cfg;
+use fprime_svc::generated::com_queue;
+use fprime_svc::generated::fprime_protocol;
+
+/// Serialize `Svc.FprimeProtocol.FrameHeader`; returns the byte count.
+///
+/// A struct of two primitives -- the simplest shape the generator emits.
+///
+/// # Safety
+/// `out` must point to `out_len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_diff_frame_header(
+    start_word: u32,
+    length_field: u32,
+    out: *mut u8,
+    out_len: FwSizeType,
+) -> FwSizeType {
+    let value = fprime_protocol::SvcFprimeProtocolFrameHeader {
+        startWord: start_word,
+        lengthField: length_field,
+    };
+    // SAFETY: the caller guarantees `out_len` writable bytes.
+    let region = unsafe { output(out, out_len as usize) };
+    let mut buf = SerBuffer::from_output(region);
+    match value.serialize_to(&mut buf, Endianness::Big) {
+        Ok(()) => buf.len() as FwSizeType,
+        Err(_) => 0,
+    }
+}
+
+/// Serialize `Svc.ComQueueDepth`; returns the byte count.
+///
+/// An array whose length came from a named FPP constant, which is the
+/// capability that unblocked real modules.
+///
+/// # Safety
+/// As above; `depths` must point to two readable `u32`s.
+#[no_mangle]
+pub unsafe extern "C" fn fprime_rs_diff_com_queue_depth(
+    depths: *const u32,
+    out: *mut u8,
+    out_len: FwSizeType,
+) -> FwSizeType {
+    // SAFETY: the caller guarantees two readable u32s.
+    let depths = unsafe { core::slice::from_raw_parts(depths, 2) };
+    let value = com_queue::SvcComQueueDepth([depths[0], depths[1]]);
+    // SAFETY: the caller guarantees `out_len` writable bytes.
+    let region = unsafe { output(out, out_len as usize) };
+    let mut buf = SerBuffer::from_output(region);
+    match value.serialize_to(&mut buf, Endianness::Big) {
+        Ok(()) => buf.len() as FwSizeType,
+        Err(_) => 0,
+    }
+}
+
+/// Serialize `ComCfg.FrameContext`; returns the byte count.
+///
+/// A struct mixing primitives, bools and two enums -- the enum representation
+/// width is the interesting part, since FPP enums are a class with a vtable in
+/// C++ and a newtype here.
+///
+/// # Safety
+/// As above.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn fprime_rs_diff_frame_context(
+    com_queue_index: i16,
+    apid: u16,
+    has_sec_hdr: bool,
+    sequence_flags: u8,
+    sequence_count: u16,
+    vc_id: u8,
+    pvn: u8,
+    send_now: bool,
+    sa_index: u16,
+    out: *mut u8,
+    out_len: FwSizeType,
+) -> FwSizeType {
+    let value = com_cfg_context(
+        com_queue_index,
+        apid,
+        has_sec_hdr,
+        sequence_flags,
+        sequence_count,
+        vc_id,
+        pvn,
+        send_now,
+        sa_index,
+    );
+    // SAFETY: the caller guarantees `out_len` writable bytes.
+    let region = unsafe { output(out, out_len as usize) };
+    let mut buf = SerBuffer::from_output(region);
+    match value.serialize_to(&mut buf, Endianness::Big) {
+        Ok(()) => buf.len() as FwSizeType,
+        Err(_) => 0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn com_cfg_context(
+    com_queue_index: i16,
+    apid: u16,
+    has_sec_hdr: bool,
+    sequence_flags: u8,
+    sequence_count: u16,
+    vc_id: u8,
+    pvn: u8,
+    send_now: bool,
+    sa_index: u16,
+) -> com_cfg::ComCfgFrameContext {
+    com_cfg::ComCfgFrameContext {
+        comQueueIndex: com_queue_index,
+        apid: com_cfg::ComCfgApid(apid),
+        hasSecHdr: has_sec_hdr,
+        sequenceFlags: sequence_flags,
+        sequenceCount: sequence_count,
+        vcId: vc_id,
+        pvn: com_cfg::ComCfgPvn(pvn),
+        sendNow: send_now,
+        saIndex: sa_index,
+    }
+}
+
+// Boundary tests exercise pointer contracts, including writable storage that
+// starts uninitialized. Run with --features test-std (see Cargo.toml).
+
 #[cfg(test)]
 // These pass raw `*const u8` across a C ABI, so the buffers are byte arrays
 // with an explicit terminator rather than `CStr`s; `c"..."` would yield
@@ -2208,6 +2408,213 @@ pub unsafe extern "C" fn fprime_rs_substring_find_last(
 #[allow(clippy::manual_c_str_literals)]
 mod tests {
     use super::*;
+    use core::mem::MaybeUninit;
+
+    /// Read only the prefix that an FFI call has initialized.
+    ///
+    /// # Safety
+    /// Every byte of the given prefix must have been written.
+    unsafe fn initialized_prefix(storage: &[MaybeUninit<u8>], length: usize) -> &[u8] {
+        assert!(length <= storage.len());
+        // SAFETY: the caller guarantees initialization of exactly this prefix.
+        unsafe { core::slice::from_raw_parts(storage.as_ptr().cast(), length) }
+    }
+
+    #[test]
+    fn output_calls_accept_uninitialized_storage() {
+        let mut storage = [MaybeUninit::<u8>::uninit(); 64];
+        let mut written = 0;
+        // SAFETY: storage is writable, the output counter is distinct, and the
+        // successful calls initialize only the prefixes inspected below.
+        unsafe {
+            assert_eq!(
+                fprime_rs_ser_u32(0x12345678, 0, storage.as_mut_ptr().cast(), 64, &mut written),
+                0
+            );
+            assert_eq!(written, 4);
+            assert_eq!(
+                initialized_prefix(&storage, written),
+                &[0x12, 0x34, 0x56, 0x78]
+            );
+        }
+        let mut string = [MaybeUninit::<u8>::uninit(); 8];
+        // SAFETY: the string is terminated, disjoint, and the output holds 8 bytes.
+        unsafe {
+            fprime_rs_string_copy(string.as_mut_ptr().cast(), b"ab\0".as_ptr(), 8);
+            assert_eq!(initialized_prefix(&string, 8), b"ab\0\0\0\0\0\0");
+        }
+        let mut path = [MaybeUninit::<u8>::uninit(); 64];
+        // SAFETY: input strings are terminated and output is writable and disjoint.
+        unsafe {
+            assert_eq!(
+                fprime_rs_path_resolve(
+                    b"a/../b\0".as_ptr(),
+                    b"/root\0".as_ptr(),
+                    path.as_mut_ptr().cast(),
+                    64,
+                    64
+                ),
+                0
+            );
+            assert_eq!(initialized_prefix(&path, 8), b"/root/b\0");
+        }
+    }
+
+    #[test]
+    fn cursor_writes_preserve_prefix_slack_and_failure_state() {
+        let mut storage = [MaybeUninit::<u8>::uninit(); 8];
+        storage[0].write(0xa5);
+        storage[7].write(0x5a);
+        let mut serialized = 1;
+        let mut deserialized = 1;
+        // SAFETY: writable storage and distinct initialized cursors. The
+        // unwritten middle remains uninitialized until the serializer writes it.
+        unsafe {
+            assert_eq!(
+                fprime_rs_lbb_ser_u32(
+                    storage.as_mut_ptr().cast(),
+                    8,
+                    &mut serialized,
+                    &mut deserialized,
+                    0x12345678,
+                    0
+                ),
+                0
+            );
+            assert_eq!((serialized, deserialized), (5, 0));
+            assert_eq!(
+                initialized_prefix(&storage, 5),
+                &[0xa5, 0x12, 0x34, 0x56, 0x78]
+            );
+            assert_eq!(storage[7].assume_init(), 0x5a);
+            deserialized = 2;
+            assert_ne!(
+                fprime_rs_lbb_ser_u32(
+                    storage.as_mut_ptr().cast(),
+                    8,
+                    &mut serialized,
+                    &mut deserialized,
+                    0,
+                    0
+                ),
+                0
+            );
+            assert_eq!((serialized, deserialized), (5, 2));
+            assert_eq!(
+                initialized_prefix(&storage, 5),
+                &[0xa5, 0x12, 0x34, 0x56, 0x78]
+            );
+            assert_eq!(storage[7].assume_init(), 0x5a);
+        }
+    }
+
+    #[test]
+    fn sparse_queue_and_ring_storage_only_reads_committed_bytes() {
+        let mut slab = [MaybeUninit::<u8>::uninit(); 24];
+        let mut sizes = [0; 3];
+        let mut received = [MaybeUninit::<u8>::uninit(); 8];
+        // SAFETY: all metadata is initialized and all allocations are disjoint.
+        // Only the stored message is read; the rest of the slab stays unwritten.
+        unsafe {
+            fprime_rs_queue_slots_store(
+                slab.as_mut_ptr().cast(),
+                sizes.as_mut_ptr(),
+                3,
+                8,
+                1,
+                b"abc".as_ptr(),
+                3,
+            );
+            fprime_rs_queue_slots_load(
+                slab.as_mut_ptr().cast(),
+                sizes.as_mut_ptr(),
+                3,
+                8,
+                1,
+                received.as_mut_ptr().cast(),
+                3,
+            );
+            assert_eq!(sizes, [0, 3, 0]);
+            assert_eq!(initialized_prefix(&received, 3), b"abc");
+        }
+
+        let mut ring = [MaybeUninit::<u8>::uninit(); 8];
+        for (index, byte) in [(6, 0x12), (7, 0x34), (0, 0x56), (1, 0x78)] {
+            ring[index].write(byte);
+        }
+        let mut word = 0;
+        let mut byte = 0;
+        // SAFETY: the four allocated bytes starting at head 6 are initialized;
+        // unused ring capacity is intentionally uninitialized.
+        unsafe {
+            assert_eq!(
+                fprime_rs_cb_peek_u32(ring.as_ptr().cast(), 8, 6, 4, 0, &mut word),
+                0
+            );
+            assert_eq!(word, 0x12345678);
+            assert_eq!(
+                fprime_rs_cb_peek_u8(ring.as_ptr().cast(), 8, 6, 4, 3, &mut byte),
+                0
+            );
+            assert_eq!(byte, 0x78);
+            assert_ne!(
+                fprime_rs_cb_peek_u8(ring.as_ptr().cast(), 8, 6, 4, 4, &mut byte),
+                0
+            );
+            assert_eq!(byte, 0x78);
+        }
+    }
+
+    #[test]
+    fn framer_initializes_only_the_frame_in_an_uninitialized_allocation() {
+        unsafe extern "C" fn allocate(ctx: *mut core::ffi::c_void, _: FwSizeType) -> ByteViewFfi {
+            // SAFETY: the test passes a live ByteViewFfi through the callback context.
+            let allocation = unsafe { &*(ctx.cast::<ByteViewFfi>()) };
+            ByteViewFfi {
+                ptr: allocation.ptr,
+                len: allocation.len,
+            }
+        }
+        let mut storage = [MaybeUninit::<u8>::uninit(); 64];
+        storage[63].write(0xa5);
+        let mut allocation = ByteViewFfi {
+            ptr: storage.as_mut_ptr().cast(),
+            len: 64,
+        };
+        let payload = [0, 1, 0xca, 0xfe];
+        let mut written = 0;
+        // SAFETY: the callback returns disjoint writable storage; context and
+        // counters outlive the call. Only the completed frame is read afterward.
+        unsafe {
+            assert_eq!(
+                fprime_rs_framer_frame(
+                    payload.as_ptr(),
+                    4,
+                    allocate,
+                    (&mut allocation as *mut ByteViewFfi).cast(),
+                    &mut written
+                ),
+                0
+            );
+            assert_eq!(
+                written as usize,
+                fprime_svc::protocol::HEADER_SIZE
+                    + payload.len()
+                    + fprime_svc::protocol::TRAILER_SIZE
+            );
+            let frame = initialized_prefix(&storage, written as usize);
+            assert_eq!(
+                fprime_svc::deframer::deframe(frame).outcome,
+                fprime_svc::deframer::Outcome::Ok
+            );
+            assert_eq!(
+                &frame[fprime_svc::protocol::HEADER_SIZE
+                    ..fprime_svc::protocol::HEADER_SIZE + payload.len()],
+                &payload
+            );
+            assert_eq!(storage[63].assume_init(), 0xa5);
+        }
+    }
 
     #[test]
     fn a_null_pointer_with_zero_length_is_an_empty_slice() {
@@ -2217,7 +2624,7 @@ mod tests {
         // SAFETY: length zero, which is exactly the case under test.
         let empty = unsafe { view(core::ptr::null(), 0) };
         // SAFETY: as above.
-        let empty_mut = unsafe { view_mut(core::ptr::null_mut(), 0) };
+        let empty_mut = unsafe { output(core::ptr::null_mut(), 0) };
         assert!(empty.is_empty());
         assert!(empty_mut.is_empty());
     }
@@ -2371,189 +2778,5 @@ mod tests {
         // SAFETY: as above.
         let accepted = unsafe { fprime_rs_time_sub(&a, &a, &mut out) };
         assert!(accepted, "equal times subtract to zero");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Os::RawTime arithmetic (Phase 15)
-// ---------------------------------------------------------------------------
-//
-// The first Os arithmetic to move. Deliberately not the clock: `now()` is a
-// clock_gettime call whose failure is read from errno, and errno is
-// thread-local and clobbered by the next failing call, so the syscall and its
-// errno read must stay together in C++. Four integers cross; no operating
-// system does.
-
-use fprime_core::raw_time::{self, Instant};
-
-/// `PosixRawTime::getTimeInterval`, as (seconds, microseconds).
-///
-/// Takes the two `timespec` fields of each instant rather than a struct: a
-/// `timespec`'s layout is the platform's, not ours, and there is nothing to
-/// gain by mirroring it when the whole payload is four integers.
-///
-/// # Safety
-/// Both out-parameters must point to writable `u32`s.
-#[no_mangle]
-pub unsafe extern "C" fn fprime_rs_rawtime_interval(
-    a_seconds: i64,
-    a_nanoseconds: i64,
-    b_seconds: i64,
-    b_nanoseconds: i64,
-    out_seconds: *mut u32,
-    out_useconds: *mut u32,
-) {
-    let (seconds, useconds) = raw_time::interval(
-        Instant {
-            seconds: a_seconds,
-            nanoseconds: a_nanoseconds,
-        },
-        Instant {
-            seconds: b_seconds,
-            nanoseconds: b_nanoseconds,
-        },
-    );
-    // SAFETY: the caller guarantees both pointers are writable.
-    unsafe {
-        *out_seconds = seconds;
-        *out_useconds = useconds;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Generated-type serialization, for the differential oracle
-// ---------------------------------------------------------------------------
-//
-// Every file the type generator emits carries the line "Serialization is
-// byte-identical to the C++ code FPP autocodes for the same model; the
-// differential unit test is the proof." These entry points are what make that
-// sentence true rather than merely intended: Rust/test/differential builds the
-// same values with the autocoded C++ types and compares the bytes.
-//
-// They exist for the test and nothing else, which is why they take the fields
-// individually instead of a mirrored struct -- the point is to drive the
-// generated code from outside without trusting a layout that is not part of
-// any contract.
-
-use fprime_svc::generated::com_cfg;
-use fprime_svc::generated::com_queue;
-use fprime_svc::generated::fprime_protocol;
-
-/// Serialize `Svc.FprimeProtocol.FrameHeader`; returns the byte count.
-///
-/// A struct of two primitives -- the simplest shape the generator emits.
-///
-/// # Safety
-/// `out` must point to `out_len` writable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn fprime_rs_diff_frame_header(
-    start_word: u32,
-    length_field: u32,
-    out: *mut u8,
-    out_len: FwSizeType,
-) -> FwSizeType {
-    let value = fprime_protocol::SvcFprimeProtocolFrameHeader {
-        startWord: start_word,
-        lengthField: length_field,
-    };
-    // SAFETY: the caller guarantees `out_len` writable bytes.
-    let region = unsafe { view_mut(out, out_len as usize) };
-    let mut buf = SerBuffer::new(region);
-    match value.serialize_to(&mut buf, Endianness::Big) {
-        Ok(()) => buf.len() as FwSizeType,
-        Err(_) => 0,
-    }
-}
-
-/// Serialize `Svc.ComQueueDepth`; returns the byte count.
-///
-/// An array whose length came from a named FPP constant, which is the
-/// capability that unblocked real modules.
-///
-/// # Safety
-/// As above; `depths` must point to two readable `u32`s.
-#[no_mangle]
-pub unsafe extern "C" fn fprime_rs_diff_com_queue_depth(
-    depths: *const u32,
-    out: *mut u8,
-    out_len: FwSizeType,
-) -> FwSizeType {
-    // SAFETY: the caller guarantees two readable u32s.
-    let depths = unsafe { core::slice::from_raw_parts(depths, 2) };
-    let value = com_queue::SvcComQueueDepth([depths[0], depths[1]]);
-    // SAFETY: the caller guarantees `out_len` writable bytes.
-    let region = unsafe { view_mut(out, out_len as usize) };
-    let mut buf = SerBuffer::new(region);
-    match value.serialize_to(&mut buf, Endianness::Big) {
-        Ok(()) => buf.len() as FwSizeType,
-        Err(_) => 0,
-    }
-}
-
-/// Serialize `ComCfg.FrameContext`; returns the byte count.
-///
-/// A struct mixing primitives, bools and two enums -- the enum representation
-/// width is the interesting part, since FPP enums are a class with a vtable in
-/// C++ and a newtype here.
-///
-/// # Safety
-/// As above.
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn fprime_rs_diff_frame_context(
-    com_queue_index: i16,
-    apid: u16,
-    has_sec_hdr: bool,
-    sequence_flags: u8,
-    sequence_count: u16,
-    vc_id: u8,
-    pvn: u8,
-    send_now: bool,
-    sa_index: u16,
-    out: *mut u8,
-    out_len: FwSizeType,
-) -> FwSizeType {
-    let value = com_cfg_context(
-        com_queue_index,
-        apid,
-        has_sec_hdr,
-        sequence_flags,
-        sequence_count,
-        vc_id,
-        pvn,
-        send_now,
-        sa_index,
-    );
-    // SAFETY: the caller guarantees `out_len` writable bytes.
-    let region = unsafe { view_mut(out, out_len as usize) };
-    let mut buf = SerBuffer::new(region);
-    match value.serialize_to(&mut buf, Endianness::Big) {
-        Ok(()) => buf.len() as FwSizeType,
-        Err(_) => 0,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn com_cfg_context(
-    com_queue_index: i16,
-    apid: u16,
-    has_sec_hdr: bool,
-    sequence_flags: u8,
-    sequence_count: u16,
-    vc_id: u8,
-    pvn: u8,
-    send_now: bool,
-    sa_index: u16,
-) -> com_cfg::ComCfgFrameContext {
-    com_cfg::ComCfgFrameContext {
-        comQueueIndex: com_queue_index,
-        apid: com_cfg::ComCfgApid(apid),
-        hasSecHdr: has_sec_hdr,
-        sequenceFlags: sequence_flags,
-        sequenceCount: sequence_count,
-        vcId: vc_id,
-        pvn: com_cfg::ComCfgPvn(pvn),
-        sendNow: send_now,
-        saIndex: sa_index,
     }
 }

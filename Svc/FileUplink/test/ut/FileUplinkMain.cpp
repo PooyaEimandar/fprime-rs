@@ -14,6 +14,16 @@ TEST(FileUplink, BadChecksum) {
     tester.badChecksum();
 }
 
+TEST(FileUplink, ReplaceWithShorterFile) {
+    Svc::FileUplinkTester tester;
+    tester.replaceFile(false);
+}
+
+TEST(FileUplink, ReplaceWithEmptyFile) {
+    Svc::FileUplinkTester tester;
+    tester.replaceFile(true);
+}
+
 TEST(FileUplink, FileOpenError) {
     Svc::FileUplinkTester tester;
     tester.fileOpenError();

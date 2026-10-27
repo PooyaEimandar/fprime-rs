@@ -42,7 +42,7 @@ jobs:
       - name: "Get target branch"
         id: get_target_branch
         run: |
-          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          BRANCH_NAME="${GITHUB_BASE_REF:-${GITHUB_REF#refs/heads/}}"
           echo "Looking for 'pr-${PR_NUMBER}'/'${BRANCH_NAME}'"
           response_code_pr=`curl -w '%{response_code}' https://api.github.com/repos/${TARGET_REPO}/branches/pr-${PR_NUMBER} -o /dev/null`
           response_code_branch=`curl -w '%{response_code}' https://api.github.com/repos/${TARGET_REPO}/branches/${BRANCH_NAME} -o /dev/null`

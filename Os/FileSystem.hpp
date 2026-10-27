@@ -326,6 +326,9 @@ class FileSystem final : public FileSystemInterface {
     //! This function opens both files, and iteratively reads the source by chunks and writes
     //! chunks to the destination.
     //!
+    //! Existing destination contents are replaced, including truncation when the
+    //! source is shorter or empty. Copying an unchanged file onto itself preserves it.
+    //!
     //! It is invalid to pass `nullptr` as either the source or destination path.
     //!
     //! \param sourcePath The path of the source file

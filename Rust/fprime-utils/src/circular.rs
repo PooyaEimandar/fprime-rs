@@ -63,6 +63,37 @@ impl<'a> RingMut<'a> {
         }
     }
 
+    pub fn commit(&mut self, size: FwSizeType) {
+        self.state().commit(size);
+    }
+
+    pub fn rotate(&mut self, amount: FwSizeType) -> SerResult {
+        self.state().rotate(amount)
+    }
+
+    pub fn trim(&mut self, amount: FwSizeType) -> SerResult {
+        self.state().trim(amount)
+    }
+
+    fn state(&mut self) -> RingState<'_> {
+        RingState {
+            store_size: self.store.len() as FwSizeType,
+            head_idx: self.head_idx,
+            allocated_size: self.allocated_size,
+            high_water_mark: self.high_water_mark,
+        }
+    }
+}
+
+/// Ring bookkeeping does not need to borrow the possibly uninitialized store.
+pub struct RingState<'a> {
+    pub store_size: FwSizeType,
+    pub head_idx: &'a mut FwSizeType,
+    pub allocated_size: &'a mut FwSizeType,
+    pub high_water_mark: &'a mut FwSizeType,
+}
+
+impl RingState<'_> {
     /// Mirrors the bookkeeping tail of the C++ serialize paths: grow the
     /// allocation and track the high-water mark. Used directly by the C++
     /// shim's linear `Fw::Serializable` path, which writes the bytes itself.
@@ -78,7 +109,7 @@ impl<'a> RingMut<'a> {
         if amount > *self.allocated_size {
             return Err(SerError::BufferEmpty);
         }
-        *self.head_idx = advance(self.store_size(), *self.head_idx, amount);
+        *self.head_idx = advance(self.store_size, *self.head_idx, amount);
         *self.allocated_size -= amount;
         Ok(())
     }

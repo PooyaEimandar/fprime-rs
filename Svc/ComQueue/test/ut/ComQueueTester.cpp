@@ -5,6 +5,7 @@
 // ======================================================================
 
 #include "ComQueueTester.hpp"
+#include <limits>
 #include "Fw/Types/MallocAllocator.hpp"
 using namespace std;
 
@@ -941,6 +942,44 @@ void ComQueueTester::testSetQueuePriorityNegativePriority() {
     // Verify no priority changed event was emitted
     ASSERT_EVENTS_QueuePriorityChanged_SIZE(0);
 
+    component.cleanup();
+}
+
+void ComQueueTester::testQueueCommandCategoryBounds() {
+    configure();
+    U8 data[BUFFER_LENGTH] = BUFFER_DATA;
+    Fw::Buffer buffer(data, sizeof(data));
+    for (FwIndexType queue = 0; queue < ComQueue::TOTAL_PORT_COUNT; ++queue) {
+        FwIndexType port;
+        QueueType type;
+        sendByQueueNumber(buffer, queue, port, type);
+    }
+    dispatchAll();
+
+    const QueueType types[] = {QueueType::COM_QUEUE, QueueType::BUFFER_QUEUE};
+    const FwIndexType counts[] = {ComQueue::COM_PORT_COUNT, ComQueue::BUFFER_PORT_COUNT};
+    for (FwSizeType type = 0; type < 2; ++type) {
+        const FwIndexType indices[] = {-1, counts[type], std::numeric_limits<FwIndexType>::min(),
+                                       std::numeric_limits<FwIndexType>::max()};
+        for (FwIndexType index : indices) {
+            clearHistory();
+            sendCmd_FLUSH_QUEUE(0, 0, types[type], index);
+            sendCmd_SET_QUEUE_PRIORITY(0, 0, types[type], index, 0);
+            dispatchAll();
+            ASSERT_CMD_RESPONSE_SIZE(2);
+            ASSERT_CMD_RESPONSE(0, ComQueue::OPCODE_FLUSH_QUEUE, 0, Fw::CmdResponse::VALIDATION_ERROR);
+            ASSERT_CMD_RESPONSE(1, ComQueue::OPCODE_SET_QUEUE_PRIORITY, 0, Fw::CmdResponse::VALIDATION_ERROR);
+            ASSERT_EVENTS_QueuePriorityChanged_SIZE(0);
+            ASSERT_from_bufferReturnOut_SIZE(0);
+        }
+    }
+
+    // Rejected commands must neither drain nor reprioritize any queue.
+    for (FwIndexType queue = 0; queue < ComQueue::TOTAL_PORT_COUNT; ++queue) {
+        ASSERT_EQ(queue, component.m_prioritizedList[queue].index);
+        ASSERT_EQ(queue, component.m_prioritizedList[queue].priority);
+        emitOneAndCheck(queue, data, sizeof(data));
+    }
     component.cleanup();
 }
 

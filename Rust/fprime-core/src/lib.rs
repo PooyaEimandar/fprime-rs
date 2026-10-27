@@ -8,6 +8,8 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod fpp_string;
+pub mod output;
+use output::OutputBytes;
 pub mod fw_buffer;
 pub mod raw_time;
 pub mod serial_buffer;
@@ -168,6 +170,16 @@ impl<'a> DeserReader<'a> {
         length: LengthMode,
         mode: Endianness,
     ) -> SerResult<usize> {
+        self.deser_bytes_output(OutputBytes::new(out), length, mode)
+    }
+
+    /// Deserialize into storage that may not yet contain initialized bytes.
+    pub fn deser_bytes_output(
+        &mut self,
+        mut out: OutputBytes<'_>,
+        length: LengthMode,
+        mode: Endianness,
+    ) -> SerResult<usize> {
         let count = match length {
             LengthMode::IncludeLength => {
                 let stored = self.deser_size_store(mode)? as usize;
@@ -183,7 +195,7 @@ impl<'a> DeserReader<'a> {
                 out.len()
             }
         };
-        out[..count].copy_from_slice(&self.data[self.loc..self.loc + count]);
+        out.write(0, &self.data[self.loc..self.loc + count]);
         self.loc += count;
         Ok(count)
     }
@@ -207,7 +219,7 @@ impl<'a> DeserReader<'a> {
 /// the read position, and — as in C++ — every successful serialize resets the
 /// read position to zero. Deserialization delegates to [`DeserReader`].
 pub struct SerBuffer<'a> {
-    data: &'a mut [u8],
+    data: OutputBytes<'a>,
     ser_loc: usize,
     deser_loc: usize,
 }
@@ -215,6 +227,11 @@ pub struct SerBuffer<'a> {
 impl<'a> SerBuffer<'a> {
     /// An empty buffer over `data` for serialization.
     pub fn new(data: &'a mut [u8]) -> Self {
+        Self::from_output(OutputBytes::new(data))
+    }
+
+    /// Empty serialization cursor over possibly uninitialized storage.
+    pub fn from_output(data: OutputBytes<'a>) -> Self {
         Self {
             data,
             ser_loc: 0,
@@ -229,7 +246,7 @@ impl<'a> SerBuffer<'a> {
             return Err(SerError::NoRoomLeft);
         }
         Ok(Self {
-            data,
+            data: OutputBytes::new(data),
             ser_loc: fill,
             deser_loc: 0,
         })
@@ -244,7 +261,7 @@ impl<'a> SerBuffer<'a> {
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.data[..self.ser_loc]
+        &self.data.initialized()[..self.ser_loc]
     }
 
     /// Bytes remaining to deserialize; mirrors `getDeserializeSizeLeft`.
@@ -261,7 +278,7 @@ impl<'a> SerBuffer<'a> {
         f: impl FnOnce(&mut DeserReader<'_>) -> SerResult<T>,
     ) -> SerResult<T> {
         let mut reader = DeserReader {
-            data: &self.data[..self.ser_loc],
+            data: &self.data.initialized()[..self.ser_loc],
             loc: self.deser_loc,
         };
         let out = f(&mut reader);
@@ -276,7 +293,7 @@ impl<'a> SerBuffer<'a> {
         if self.ser_loc + bytes.len() > self.data.len() {
             return Err(SerError::NoRoomLeft);
         }
-        self.data[self.ser_loc..self.ser_loc + bytes.len()].copy_from_slice(bytes);
+        self.data.write(self.ser_loc, bytes);
         self.ser_loc += bytes.len();
         // C++ resets the read cursor on every write.
         self.deser_loc = 0;
@@ -309,7 +326,7 @@ impl<'a> SerBuffer<'a> {
         if self.ser_loc + bytes.len() > self.data.len() {
             return Err(SerError::NoRoomLeft);
         }
-        self.data[self.ser_loc..self.ser_loc + bytes.len()].copy_from_slice(bytes);
+        self.data.write(self.ser_loc, bytes);
         self.ser_loc += bytes.len();
         self.deser_loc = 0;
         Ok(())

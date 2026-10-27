@@ -107,6 +107,8 @@ class ComQueueTester : public ComQueueGTestBase {
 
     void testSetQueuePriorityNegativePriority();
 
+    void testQueueCommandCategoryBounds();
+
   private:
     // ----------------------------------------------------------------------
     // Helper methods

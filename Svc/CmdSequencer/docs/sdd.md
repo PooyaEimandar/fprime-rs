@@ -225,7 +225,7 @@ The format for each record is as follows:
 Record Field | Size (bytes) | Description
 ------------ | ------------ | -----------
 Descriptor | 1 | What kind of record it is. 0 = absolute time command, 1 = relative time command, 2 = end of sequence
-Command Time | 8 | Start time of command. Depending on descriptor, will be relative or absolute. First four bytes are seconds of command, second four bytes are microseconds of command.
+Command Time | 8 | Start time of command. Depending on descriptor, will be relative or absolute. First four bytes are seconds of command, second four bytes are microseconds of command, in the range 0–999,999. Out-of-range microseconds cause record validation to fail.
 Record Size | 4 | Size of command buffer
 Command Buffer | >= 4 | Buffer containing command packet descriptor, command opcode, and zero or more serialized arguments.
 

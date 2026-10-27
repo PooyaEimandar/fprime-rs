@@ -81,6 +81,15 @@ pub fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// than overflowing. Callers must not overlap the two — the C++ asserts it,
 /// and this takes two distinct slices, so the borrow checker enforces it here.
 pub fn string_copy(destination: &mut [u8], source: &[u8], num: usize) -> usize {
+    string_copy_output(crate::output::OutputBytes::new(destination), source, num)
+}
+
+/// Copy and NUL-pad into storage that may initially be uninitialized.
+pub fn string_copy_output(
+    mut destination: crate::output::OutputBytes<'_>,
+    source: &[u8],
+    num: usize,
+) -> usize {
     if num == 0 || destination.is_empty() {
         return 0;
     }
@@ -89,11 +98,9 @@ pub fn string_copy(destination: &mut [u8], source: &[u8], num: usize) -> usize {
     // so a source that fills the destination loses its last character rather
     // than its terminator.
     let copied = source.len().min(limit.saturating_sub(1));
-    destination[..copied].copy_from_slice(&source[..copied]);
+    destination.write(0, &source[..copied]);
     // strncpy pads the remainder of the first `num` bytes with NUL.
-    for slot in destination[copied..limit].iter_mut() {
-        *slot = 0;
-    }
+    destination.fill(copied, limit, 0);
     copied + 1
 }
 

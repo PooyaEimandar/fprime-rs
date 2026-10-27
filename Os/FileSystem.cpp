@@ -158,20 +158,31 @@ FileSystem::Status FileSystem::copyFile(const char* sourcePath, const char* dest
     if (fileStatus != Os::File::OP_OK) {
         return FileSystem::handleFileError(fileStatus);
     }
+    FwSizeType sourceFileSize = 0;
+    fileStatus = source.size(sourceFileSize);
+    if (fileStatus != Os::File::OP_OK) {
+        return FileSystem::handleFileError(fileStatus);
+    }
     fileStatus = destination.open(destPath, Os::File::OPEN_WRITE);
     if (fileStatus != Os::File::OP_OK) {
         return FileSystem::handleFileError(fileStatus);
     }
-
-    FwSizeType sourceFileSize = 0;
-    FileSystem::Status fs_status = FileSystem::getFileSize(sourcePath, sourceFileSize);
-    if (fs_status != FileSystem::Status::OP_OK) {
-        return fs_status;
+    FwSizeType destinationFileSize = 0;
+    fileStatus = destination.size(destinationFileSize);
+    if (fileStatus != Os::File::OP_OK) {
+        return FileSystem::handleFileError(fileStatus);
     }
-
-    fs_status = FileSystem::copyFileData(source, destination, sourceFileSize);
-
-    return fs_status;
+    // Only a longer destination needs truncation. Checking before truncating
+    // also preserves self-copies, including aliases of the same unchanged file:
+    // those handles necessarily report the same size.
+    if (destinationFileSize > sourceFileSize) {
+        destination.close();
+        fileStatus = destination.open(destPath, Os::File::OPEN_CREATE, Os::File::OVERWRITE);
+        if (fileStatus != Os::File::OP_OK) {
+            return FileSystem::handleFileError(fileStatus);
+        }
+    }
+    return FileSystem::copyFileData(source, destination, sourceFileSize);
 }  // end copyFile
 
 FileSystem::Status FileSystem::appendFile(const char* sourcePath, const char* destPath, bool createMissingDest) {

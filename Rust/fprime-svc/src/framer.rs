@@ -7,6 +7,8 @@
 //!
 //! The C++ shim keeps the FW_ASSERT preconditions, events, and port sends.
 
+use fprime_core::output::OutputBytes;
+
 use crate::protocol::{frame_crc, HEADER_SIZE, START_WORD, TRAILER_SIZE};
 
 /// The allocator returned no buffer, or one smaller than the frame
@@ -27,17 +29,25 @@ pub fn frame<'a>(
     payload: &[u8],
     alloc: impl FnOnce(u64) -> Option<&'a mut [u8]>,
 ) -> Result<usize, NoBuffer> {
+    frame_output(payload, |size| alloc(size).map(OutputBytes::new))
+}
+
+/// Frame into an allocation whose unused bytes may be uninitialized.
+pub fn frame_output<'a>(
+    payload: &[u8],
+    alloc: impl FnOnce(u64) -> Option<OutputBytes<'a>>,
+) -> Result<usize, NoBuffer> {
     let frame_size = HEADER_SIZE + payload.len() + TRAILER_SIZE;
-    let storage = match alloc(frame_size as u64) {
+    let mut storage = match alloc(frame_size as u64) {
         Some(storage) if storage.len() >= frame_size => storage,
         _ => return Err(NoBuffer),
     };
 
-    storage[0..4].copy_from_slice(&START_WORD.to_be_bytes());
-    storage[4..8].copy_from_slice(&(payload.len() as u32).to_be_bytes());
-    storage[HEADER_SIZE..HEADER_SIZE + payload.len()].copy_from_slice(payload);
-    let crc = frame_crc(&storage[..HEADER_SIZE + payload.len()]);
-    storage[HEADER_SIZE + payload.len()..frame_size].copy_from_slice(&crc.to_be_bytes());
+    storage.write(0, &START_WORD.to_be_bytes());
+    storage.write(4, &(payload.len() as u32).to_be_bytes());
+    storage.write(HEADER_SIZE, payload);
+    let crc = frame_crc(&storage.initialized()[..HEADER_SIZE + payload.len()]);
+    storage.write(HEADER_SIZE + payload.len(), &crc.to_be_bytes());
     Ok(frame_size)
 }
 

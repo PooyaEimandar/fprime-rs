@@ -109,6 +109,26 @@ TEST_F(Functionality, CopyFile) {
     move_rule.apply(*tester);
 }
 
+TEST_F(Functionality, CopyOverExistingFile) {
+    auto& source = tester->m_test_files[0];
+    auto& destination = tester->m_test_files[1];
+    const std::string contents[] = {"new", "", "a longer replacement", "same size"};
+    for (const auto& content : contents) {
+        source.contents = content;
+        destination.contents = "old bytes";
+        tester->purge_test_state_from_disk();
+        tester->write_test_state_to_disk();
+        ASSERT_EQ(Os::FileSystem::OP_OK, Os::FileSystem::copyFile(source.path.c_str(), destination.path.c_str()));
+        destination.contents = content;
+        ASSERT_TRUE(tester->validate_contents_on_disk(destination));
+        ASSERT_TRUE(tester->validate_contents_on_disk(source));
+
+        // Copying onto the source itself must not truncate it.
+        ASSERT_EQ(Os::FileSystem::OP_OK, Os::FileSystem::copyFile(source.path.c_str(), source.path.c_str()));
+        ASSERT_TRUE(tester->validate_contents_on_disk(source));
+    }
+}
+
 // AppendFile
 TEST_F(Functionality, AppendFile) {
     Os::Test::FileSystem::Tester::AppendFile append_rule;

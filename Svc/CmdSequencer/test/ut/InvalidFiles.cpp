@@ -10,12 +10,62 @@
 // ======================================================================
 
 #include "Svc/CmdSequencer/test/ut/InvalidFiles.hpp"
+#include "Fw/Com/ComPacket.hpp"
 #include "Os/FileSystem.hpp"
 #include "Svc/CmdSequencer/test/ut/CommandBuffers.hpp"
+#include "Svc/CmdSequencer/test/ut/SequenceFiles/FPrime/FPrime.hpp"
 
 namespace Svc {
 
 namespace InvalidFiles {
+
+namespace {
+class TimeFieldFile : public SequenceFiles::File {
+  public:
+    explicit TimeFieldFile(U32 useconds) : File("microsecond_range"), m_useconds(useconds) {}
+
+    void serializeFPrime(Fw::LinearBufferBase& buffer) override {
+        using namespace SequenceFiles::FPrime;
+        Headers::serialize(Records::STANDARD_SIZE + CRCs::SIZE, 1, TimeBase::TB_WORKSTATION_TIME, 0, buffer);
+        // Serialize wire fields directly: Fw::Time correctly rejects invalid microseconds.
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK,
+                  buffer.serializeFrom(static_cast<U8>(CmdSequencerComponentImpl::Sequence::Record::RELATIVE)));
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK, buffer.serializeFrom(static_cast<U32>(2)));
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK, buffer.serializeFrom(m_useconds));
+        const U32 commandSize = sizeof(FwPacketDescriptorType) + sizeof(FwOpcodeType) + sizeof(U32);
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK, buffer.serializeFrom(commandSize));
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK,
+                  buffer.serializeFrom(static_cast<FwPacketDescriptorType>(Fw::ComPacketType::FW_PACKET_COMMAND)));
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK, buffer.serializeFrom(static_cast<FwOpcodeType>(0)));
+        ASSERT_EQ(Fw::FW_SERIALIZE_OK, buffer.serializeFrom(static_cast<U32>(1)));
+        CRCs::serialize(buffer);
+    }
+
+  private:
+    U32 m_useconds;
+};
+}  // namespace
+
+void CmdSequencerTester::TimeMicrosecondRange(U32 useconds) {
+    REQUIREMENT("ISF-CMDS-002");
+    this->setTestTime(Fw::Time(TimeBase::TB_WORKSTATION_TIME, 1, 1));
+    TimeFieldFile file(useconds);
+    file.write();
+    this->sendCmd_CS_VALIDATE(0, 0, file.getName());
+    this->clearAndDispatch();
+    ASSERT_CMD_RESPONSE_SIZE(1);
+    if (useconds < 1000000) {
+        ASSERT_CMD_RESPONSE(0, this->getValidateOpcode(), 0, Fw::CmdResponse::OK);
+    } else {
+        ASSERT_CMD_RESPONSE(0, this->getValidateOpcode(), 0, Fw::CmdResponse::EXECUTION_ERROR);
+        ASSERT_EVENTS_CS_RecordInvalid(0, file.getName().toChar(), 0, Fw::FW_DESERIALIZE_FORMAT_ERROR);
+        this->sendCmd_CS_RUN(0, 0, file.getName(), Svc::BlockState::NO_BLOCK);
+        this->clearAndDispatch();
+        ASSERT_CMD_RESPONSE_SIZE(1);
+        ASSERT_CMD_RESPONSE(0, this->getRunOpcode(), 0, Fw::CmdResponse::EXECUTION_ERROR);
+        ASSERT_EVENTS_CS_RecordInvalid(0, file.getName().toChar(), 0, Fw::FW_DESERIALIZE_FORMAT_ERROR);
+    }
+}
 
 // ----------------------------------------------------------------------
 // Constructors

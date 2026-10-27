@@ -270,6 +270,11 @@ Fw::SerializeStatus CmdSequencerComponentImpl::FPrimeSequence ::deserializeTimeT
         status = buffer.deserializeTo(useconds);
     }
     if (status == Fw::FW_SERIALIZE_OK) {
+        // Time::set asserts its representation invariant; sequence data must
+        // be validated before calling it.
+        if (useconds >= 1000000) {
+            return Fw::FW_DESERIALIZE_FORMAT_ERROR;
+        }
         timeTag.set(seconds, useconds);
     }
     return status;

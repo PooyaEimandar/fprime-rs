@@ -183,6 +183,30 @@ TEST(Ephemeral, TestEphemeralPorts) {
     receiver.close(recv_fd);
 }
 
+TEST(SingleSide, ReopenReceiveOnlySocket) {
+    Drv::UdpSocket receiver;
+    ASSERT_EQ(receiver.configureRecv("127.0.0.1", 0), Drv::SOCK_SUCCESS);
+    for (U32 iteration = 0; iteration < 2; ++iteration) {
+        Drv::SocketDescriptor recv_fd;
+        ASSERT_EQ(receiver.open(recv_fd), Drv::SOCK_SUCCESS);
+        Drv::Test::force_recv_timeout(recv_fd.fd, receiver);
+
+        // Each opening must learn its peer anew, without changing send configuration.
+        const U8 byte = 1;
+        EXPECT_NE(receiver.send(recv_fd, &byte, 1), Drv::SOCK_SUCCESS);
+        Drv::UdpSocket sender;
+        Drv::SocketDescriptor send_fd;
+        ASSERT_EQ(sender.configureRecv("127.0.0.1", 0), Drv::SOCK_SUCCESS);
+        ASSERT_EQ(sender.configureSend("127.0.0.1", receiver.getRecvPort(), 0, 100), Drv::SOCK_SUCCESS);
+        ASSERT_EQ(sender.open(send_fd), Drv::SOCK_SUCCESS);
+        Drv::Test::force_recv_timeout(send_fd.fd, sender);
+        Drv::Test::send_recv(sender, receiver, send_fd, recv_fd);
+        Drv::Test::send_recv(receiver, sender, recv_fd, send_fd);
+        sender.close(send_fd);
+        receiver.close(recv_fd);
+    }
+}
+
 #ifndef TGT_OS_TYPE_VXWORKS
 // A send port of 0 means "reply to the source of the last datagram received", so such a
 // socket does send and the configured send timeout has to reach it. It used to be applied

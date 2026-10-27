@@ -112,15 +112,17 @@ FFI surface the guidelines do not yet cover.
 
 ## Unsafe inventory
 
-All unsafe code is confined to two places, both by design:
+The hand-written unsafe code is concentrated in these modules:
 
 - **`fprime-ffi`** — the `extern "C"` surface. Raw-pointer parameters from
-  C++, converted through null-safe `view`/`view_mut` helpers (a null pointer
+  C++, converted through null-safe `view`/`output` helpers (a null pointer
   with zero length is accepted, matching the `Fw::LinearBufferBase` contract).
 - **`fprime-utils::circular` and `fprime-svc::router_table`** — raw-pointer
   routines that exist specifically to tolerate what safe Rust forbids:
   overlap-tolerant per-byte copies matching the C++ loops they mirror, and a
   strided view over a C++-resident entry array.
+- **`fprime-core::output`** — a bounded write-only view over `MaybeUninit<u8>`
+  storage. Its safe API exposes byte slices only over a known initialized prefix.
 
 Phases 12 and 13 add unsafe to *generated* code for the first time. The
 component glue now dereferences two kinds of caller-owned pointer: a `ref`
@@ -162,8 +164,9 @@ shim asserts size, alignment and every field offset against the C++ `Node` at
 heap creation. A disagreement would corrupt a queue silently rather than
 fail, which is why it is checked rather than assumed.
 
-`fprime-config` and `fprime-core` contain no unsafe code, and neither does
-the rest of `fprime-utils`. `fprime-svc` has one hand-written exception:
+`fprime-config` contains no unsafe code. Outside `output`, `fprime-core`
+contains no unsafe code, and neither does the rest of `fprime-utils`.
+`fprime-svc` has one additional hand-written exception:
 `rust_demo.rs` calls `Buffer::as_slice`, which is `unsafe fn` because the
 payload is valid only for the duration of the port call. That is the shape
 every component handler taking an `Fw::Buffer` will have, so it is named here
@@ -177,8 +180,9 @@ replaces makes — that only ever indexed the bytes it actually touched. The
 `Fw` kernel entry points (Phase 8) therefore borrow as narrowly as the
 operation allows:
 
-- writes (`fprime_rs_lbb_ser_*`) borrow `capacity` bytes mutably — that is
-  what `m_capacity` means, so the claim is the object's own invariant;
+- primitive writes (`fprime_rs_lbb_ser_*`) borrow only the unused suffix
+  from `m_serLoc` to `m_capacity` as `MaybeUninit<u8>`; the capacity must
+  describe a live writable allocation, but unused bytes need not be initialized;
 - reads (`fprime_rs_lbb_deser_*`) take a `const` pointer and borrow only
   `min(m_serLoc, m_capacity)` bytes — a read can never reach past the write
   high-water mark, so the borrow must not span past it either.
@@ -207,22 +211,22 @@ enabling `FPRIME_RUST_IMPL_FW_TYPES` (it is OFF by default).
 
 ### Borrowing uninitialized storage
 
-A second, more pervasive deviation, and one that applies to every phase rather
-than only to Phase 8: the buffers C++ hands across are routinely
-**uninitialized**. `Fw::ExternalSerializeBuffer` is constructed over a raw
-`U8[N]`, and `Os::FilePathUtils::resolvePath` writes into a bare
-`char resolvedOut[MAX_PATH_LENGTH]`. Forming a `&mut [u8]` over uninitialized
-bytes is UB under Rust's current memory model even though `u8` has no invalid
-bit patterns, and the write-side helpers here do exactly that.
+C++ output buffers routinely start uninitialized, including serialization
+buffers, strings, resolved paths, and frame allocations. The FFI `output`
+helper borrows these as `&mut [MaybeUninit<u8>]`, never as `&mut [u8]`.
+`fprime-core::output::OutputBytes` writes with bounds checks, tracks the
+contiguous initialized prefix, and exposes byte slices only within that
+prefix. Framing computes its CRC after initializing the header and payload;
+path normalization reads only the constructed, terminated path. Neither
+operation initializes or reads unused output capacity.
 
-This is not a case where the C++ is safer -- the same memory is equally
-uninitialized on that side, and it is what the API is for. It is called out
-because it is the kind of thing a qualification review would ask about, and
-because the honest answer is that the pattern is relied on rather than
-avoided. Avoiding it would mean the write paths taking `*mut u8` and using
-`ptr::write` throughout, which would move them out of safe Rust entirely and
-give up the bounds checking that is the reason for the port. The trade is
-deliberate; it is recorded here rather than left implicit.
+Sparse queue slabs use raw copies of the stored message length instead of a
+slice over the whole slab. Circular-buffer scalar reads copy only the
+allocated ring region into initialized local bytes; metadata-only operations
+do not borrow the backing storage. These contracts preserve C++ callers that
+initialize only part of their allocation. The boundary tests pass
+`MaybeUninit` storage through serialization, strings, paths, framing, queues,
+and wrapped ring reads, and check preserved prefixes and unused bytes.
 
 ### A shim reports its own filename
 

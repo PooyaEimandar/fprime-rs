@@ -102,7 +102,7 @@ then close the file at
 [*writeFileDescriptor*](#writeFileDescriptor)
 and issue an *InvalidReceiveMode* warning.
 
-2. Open the file for writing and set
+2. Create the file for writing, truncating any existing file to zero bytes, and set
 [*writeFileDescriptor*](#writeFileDescriptor).
 
 3. If step 2 succeeded, then set

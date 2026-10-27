@@ -108,6 +108,20 @@ pub struct SlotStore<'a> {
     pub max_size: FwSizeType,
 }
 
+/// Checked byte range of one slot; does not borrow unused slab memory.
+pub fn slot_span(depth: usize, max_size: FwSizeType, index: FwSizeType) -> (usize, usize) {
+    let slot = index as usize;
+    assert!(slot < depth, "queue slot index is past the depth");
+    let width = max_size as usize;
+    let start = slot
+        .checked_mul(width)
+        .expect("queue slab offset overflows a pointer");
+    let end = start
+        .checked_add(width)
+        .expect("queue slab offset overflows a pointer");
+    (start, end)
+}
+
 impl SlotStore<'_> {
     /// The byte range slot `index` occupies, checked.
     ///
@@ -115,18 +129,7 @@ impl SlotStore<'_> {
     /// asserting the index and the size separately; doing it as a slice range
     /// makes the product itself the thing that is checked.
     fn span(&self, index: FwSizeType) -> (usize, usize) {
-        let slot = index as usize;
-        assert!(
-            slot < self.sizes.len(),
-            "queue slot index is past the depth"
-        );
-        let width = self.max_size as usize;
-        let start = slot
-            .checked_mul(width)
-            .expect("queue slab offset overflows a pointer");
-        let end = start
-            .checked_add(width)
-            .expect("queue slab offset overflows a pointer");
+        let (start, end) = slot_span(self.sizes.len(), self.max_size, index);
         assert!(
             end <= self.data.len(),
             "queue slab is smaller than its depth"

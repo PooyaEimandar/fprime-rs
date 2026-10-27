@@ -103,6 +103,34 @@ void FileUplinkTester ::sendFile() {
     this->removeFile(destPath);
 }
 
+void FileUplinkTester ::replaceFile(bool empty) {
+    const char* const destPath = "dest.bin";
+    const U8 oldData[] = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+    Os::File existing;
+    ASSERT_EQ(Os::File::OP_OK, existing.open(destPath, Os::File::OPEN_CREATE, Os::File::OVERWRITE));
+    FwSizeType oldSize = sizeof(oldData);
+    ASSERT_EQ(Os::File::OP_OK, existing.write(oldData, oldSize));
+    ASSERT_EQ(sizeof(oldData), oldSize);
+    existing.close();
+
+    U8 data[PACKET_SIZE] = {0, 1, 2, 3, 4};
+    const FwSizeType size = empty ? 0 : sizeof(data);
+    this->sendStartPacket("source.bin", destPath, size);
+    ASSERT_EVENTS_SIZE(0);
+    CFDP::Checksum checksum;
+    if (!empty) {
+        this->sendDataPacket(0, data);
+        checksum.update(data, 0, size);
+    }
+    this->sendEndPacket(checksum);
+    ASSERT_EVENTS_FileReceived(0, destPath);
+    ASSERT_TLM_FilesReceived(0, 1);
+    ASSERT_from_fileAnnounce_SIZE(1);
+    ASSERT_EQ(FileUplink::START, this->component.m_receiveMode);
+    this->verifyFileData(destPath, data, size);
+    this->removeFile(destPath);
+}
+
 void FileUplinkTester ::badChecksum() {
     const char* const sourcePath = "source.bin";
     const char* const destPath = "dest.bin";
@@ -522,9 +550,15 @@ void FileUplinkTester ::sendCancelPacket() {
 
 void FileUplinkTester ::verifyFileData(const char* const path, const U8* const sentData, const size_t dataSize) {
     Os::File file;
-    U8 fileData[dataSize];
+    U8 fileData[dataSize == 0 ? 1 : dataSize];
 
-    file.open(path, Os::File::OPEN_READ);
+    ASSERT_EQ(Os::File::OP_OK, file.open(path, Os::File::OPEN_READ));
+    FwSizeType actualSize = 0;
+    ASSERT_EQ(Os::File::OP_OK, file.size(actualSize));
+    ASSERT_EQ(dataSize, actualSize);
+    if (dataSize == 0) {
+        return;
+    }
 
     FwSizeType intSize = static_cast<FwSizeType>(dataSize);
     const Os::File::Status status = file.read(fileData, intSize);

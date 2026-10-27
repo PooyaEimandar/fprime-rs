@@ -8,6 +8,7 @@
 // ----------------------------------------------------------------------
 
 #include <Os/FileSystem.hpp>
+#include <limits>
 #include "CmdSequencerTester.hpp"
 #include "Svc/CmdSequencer/test/ut/AMPCS.hpp"
 #include "Svc/CmdSequencer/test/ut/Health.hpp"
@@ -320,6 +321,21 @@ TEST(InvalidFiles, SizeFieldTooSmall) {
 TEST(InvalidFiles, USecFieldTooShort) {
     Svc::InvalidFiles::CmdSequencerTester tester;
     tester.USecFieldTooShort();
+}
+
+TEST(InvalidFiles, LargestValidMicrosecond) {
+    Svc::InvalidFiles::CmdSequencerTester tester;
+    tester.TimeMicrosecondRange(999999);
+}
+
+TEST(InvalidFiles, MicrosecondEqualsOneSecond) {
+    Svc::InvalidFiles::CmdSequencerTester tester;
+    tester.TimeMicrosecondRange(1000000);
+}
+
+TEST(InvalidFiles, MaximumMicrosecondField) {
+    Svc::InvalidFiles::CmdSequencerTester tester;
+    tester.TimeMicrosecondRange(std::numeric_limits<U32>::max());
 }
 
 TEST(Mixed, AutoByCommand) {

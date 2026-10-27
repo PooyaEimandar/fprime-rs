@@ -43,6 +43,9 @@ class FileUplinkTester : public FileUplinkGTestBase {
     //!
     void sendFile();
 
+    //! Replace an existing file with a shorter or empty uplink
+    void replaceFile(bool empty);
+
     //! Send a file with a bad checksum value
     //!
     void badChecksum();

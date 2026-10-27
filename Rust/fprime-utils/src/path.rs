@@ -14,6 +14,7 @@
 //! a comment.
 
 use fprime_config::FwSizeType;
+use fprime_core::output::OutputBytes;
 
 /// Mirrors `Os::FilePathUtils::Status`; the discriminants are the C++ enum's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +54,7 @@ fn c_len(buf: &[u8], limit: usize) -> Option<usize> {
 fn build_absolute(
     path: &[u8],
     base: Option<&[u8]>,
-    out: &mut [u8],
+    out: &mut OutputBytes<'_>,
     max_path: usize,
 ) -> Result<usize, Status> {
     let path_len = c_len(path, max_path).ok_or(Status::InvalidPath)?;
@@ -70,22 +71,22 @@ fn build_absolute(
         if base_len + needs_slash + path_len + 1 > out.len() {
             return Err(Status::TooLong);
         }
-        out[..base_len].copy_from_slice(&base[..base_len]);
+        out.write(0, &base[..base_len]);
         let mut pos = base_len;
         if needs_slash == 1 {
-            out[pos] = b'/';
+            out.write(pos, b"/");
             pos += 1;
         }
-        out[pos..pos + path_len].copy_from_slice(&path[..path_len]);
+        out.write(pos, &path[..path_len]);
         pos += path_len;
-        out[pos] = 0;
+        out.write(pos, &[0]);
         Ok(pos)
     } else {
         if path_len + 1 > out.len() {
             return Err(Status::TooLong);
         }
-        out[..path_len].copy_from_slice(&path[..path_len]);
-        out[path_len] = 0;
+        out.write(0, &path[..path_len]);
+        out.write(path_len, &[0]);
         Ok(path_len)
     }
 }
@@ -152,14 +153,25 @@ pub fn resolve_path(
     out: &mut [u8],
     max_path: FwSizeType,
 ) -> Status {
+    resolve_path_output(path, base, OutputBytes::new(out), max_path)
+}
+
+/// Resolve into caller storage without assuming its unused bytes are initialized.
+pub fn resolve_path_output(
+    path: &[u8],
+    base: Option<&[u8]>,
+    mut out: OutputBytes<'_>,
+    max_path: FwSizeType,
+) -> Status {
     let max_path = max_path as usize;
     if path.is_empty() || path[0] == 0 {
         return Status::InvalidPath;
     }
-    if let Err(status) = build_absolute(path, base, out, max_path) {
-        return status;
-    }
-    match resolve_in_place(out, max_path) {
+    let length = match build_absolute(path, base, &mut out, max_path) {
+        Ok(length) => length,
+        Err(status) => return status,
+    };
+    match resolve_in_place(&mut out.initialized_mut()[..=length], max_path) {
         Ok(()) => Status::Valid,
         Err(status) => status,
     }

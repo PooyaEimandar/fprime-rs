@@ -59,6 +59,9 @@ class CmdSequencerTester : public Svc::CmdSequencerTester {
     //! Microseconds field too short
     void USecFieldTooShort();
 
+    //! Validate microsecond bounds before constructing a timestamp
+    void TimeMicrosecondRange(U32 useconds);
+
     //! Missing CRC
     void MissingCRC();
 

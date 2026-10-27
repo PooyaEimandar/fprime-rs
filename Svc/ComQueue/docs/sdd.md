@@ -157,6 +157,11 @@ The `run` port handler does the following:
 | SET_QUEUE_PRIORITY | Changes a queue's priority and re-sorts all queues                           |
 
 
+Both commands that select a queue validate the index within the selected queue
+type: `[0, COM_PORT_COUNT)` for `COM_QUEUE` and `[0, BUFFER_PORT_COUNT)` for
+`BUFFER_QUEUE`. An invalid index returns `VALIDATION_ERROR` without changing
+queue contents or priority.
+
 ### 4.9 Helper Functions
 
 #### 4.9.1 sendComBuffer
