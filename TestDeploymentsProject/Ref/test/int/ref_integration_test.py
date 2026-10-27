@@ -306,7 +306,12 @@ def test_seqgen_complex_args(fprime_test_api):
         == 0
     ), "Failed to run fprime-seqgen"
     fprime_test_api.send_and_assert_command(
-        "Ref.cmdSeq.CS_RUN", args=["/tmp/ref_test_complex.bin", "BLOCK"], max_delay=5
+        # The sequence spaces commands to avoid overflowing Ref's event queue.
+        # Allow for its delays, scheduler ticks, and downlink aggregation.
+        "Ref.cmdSeq.CS_RUN",
+        args=["/tmp/ref_test_complex.bin", "BLOCK"],
+        max_delay=10,
+        timeout=12,
     )
 
 

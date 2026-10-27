@@ -2337,7 +2337,7 @@ def generate_component_header(
     return "\n".join(out)
 
 
-def env_construction(component, events, channels, commands, prefix):
+def env_construction(component, events, channels, commands, prefix, handler_params):
     """The Env the shim hands to Rust for one port call.
 
     Each entry is a *captureless* lambda, so it converts to a plain function
@@ -2345,31 +2345,58 @@ def env_construction(component, events, channels, commands, prefix):
     class's scope, which is what lets it reach the autocoded base's protected
     emitter through the instance it is handed.
     """
+    # GCC diagnoses shadowing even in captureless lambdas. Callback names must
+    # avoid both the model's handler parameters and the shim's own locals.
+    enclosing_names = {"portNum", "opCode", "cmdSeq", "env", component}
+    enclosing_names.update(p.name for p in handler_params)
+    enclosing_names.update(f"rs_{p.name}" for p in handler_params)
+
+    def callback_names(stems):
+        used = set(enclosing_names)
+        names = []
+        for stem in stems:
+            base = f"callback_{stem}"
+            name = base
+            suffix = 2
+            while name in used:
+                name = f"{base}_{suffix}"
+                suffix += 1
+            used.add(name)
+            names.append(name)
+        return names
+
     out = [
         f"    {prefix}_Env env = {{}};",
         "    env.component = this;",
     ]
     for event in events:
-        params = "".join(f", {c_type(p.desc)} {p.name}" for p in event.params)
-        call = "".join(f", {p.name}" for p in event.params)
+        context, *names = callback_names(["component"] + [p.name for p in event.params])
+        params = "".join(
+            f", {c_type(p.desc)} {name}" for p, name in zip(event.params, names)
+        )
+        call = ", ".join(names)
         out += [
-            f"    env.{snake(event.name)} = [](void* component{params}) {{",
-            f"        static_cast<{component}*>(component)->{event.cpp_method}({call.lstrip(', ')});",
+            f"    env.{snake(event.name)} = [](void* {context}{params}) {{",
+            f"        static_cast<{component}*>({context})->{event.cpp_method}({call});",
             "    };",
         ]
     for channel in channels:
+        context, value = callback_names(["component", "value"])
         out += [
             f"    env.tlm_{snake(channel.name)} = "
-            f"[](void* component, {c_type(channel.desc)} value) {{",
-            f"        static_cast<{component}*>(component)->tlmWrite_{channel.name}(value);",
+            f"[](void* {context}, {c_type(channel.desc)} {value}) {{",
+            f"        static_cast<{component}*>({context})->tlmWrite_{channel.name}({value});",
             "    };",
         ]
     if commands:
+        context, opcode, sequence, response = callback_names(
+            ["component", "opcode", "cmdSeq", "response"]
+        )
         out += [
-            "    env.cmd_response = [](void* component, uint32_t opcode,",
-            "                          uint32_t cmdSeq, uint32_t response) {",
-            f"        static_cast<{component}*>(component)->cmdResponse_out(",
-            "            static_cast<FwOpcodeType>(opcode), cmdSeq,",
+            f"    env.cmd_response = [](void* {context}, uint32_t {opcode},",
+            f"                          uint32_t {sequence}, uint32_t {response}) {{",
+            f"        static_cast<{component}*>({context})->cmdResponse_out(",
+            f"            static_cast<FwOpcodeType>({opcode}), {sequence},",
             # SerialType, not T. The generated enum has two constructors: the
             # one taking `enum T` asserts AFTER the caller has already cast,
             # and casting an out-of-range value to a plain enum is undefined
@@ -2378,7 +2405,7 @@ def env_construction(component, events, channels, commands, prefix):
             # first, so a Rust handler that answers with a nonsense response
             # faults cleanly instead.
             "            Fw::CmdResponse("
-            "static_cast<Fw::CmdResponse::SerialType>(response)));",
+            f"static_cast<Fw::CmdResponse::SerialType>({response})));",
             "    };",
         ]
     return out
@@ -2538,7 +2565,9 @@ def generate_component_shim(
         for p in port.params:
             out += cpp_prologue(p)
         if has_env:
-            out += env_construction(component, events, channels, commands, prefix)
+            out += env_construction(
+                component, events, channels, commands, prefix, port.params
+            )
         env_arg = ", &env" if has_env else ""
         invoke = (
             f"{prefix}_{port.name}(this->m_rustHandlers, "
@@ -2567,7 +2596,9 @@ def generate_component_shim(
         )
         for p in command.params:
             out += cpp_prologue(p)
-        out += env_construction(component, events, channels, commands, prefix)
+        out += env_construction(
+            component, events, channels, commands, prefix, command.params
+        )
         out.append(
             f"    {prefix}_cmd_{command.name}(this->m_rustHandlers, &env, "
             f"static_cast<uint32_t>(opCode), cmdSeq{call});"

@@ -25,6 +25,7 @@ venv fails loudly instead of quietly passing. Exits non-zero on failure.
 """
 
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -902,6 +903,56 @@ def a_buffer_port_pulls_in_the_buffer_header():
         """
     )
     assert "Fw/Buffer/Buffer.hpp" not in without, without
+
+
+@case
+def callback_parameters_do_not_shadow_handler_parameters():
+    """GCC rejects shadowing inside captureless lambdas; Clang permits it.
+
+    Cover events, telemetry and command responses, including model names that
+    already use the callback prefix so a fixed rename cannot hide the defect.
+    """
+    desc = ("prim", "u32", 4)
+    params = [
+        G.Param(name, desc, name == "value")
+        for name in (
+            "value",
+            "seed",
+            "callback_component",
+            "callback_component_2",
+            "callback_value",
+            "callback_value_2",
+            "callback_seed",
+            "callback_opcode",
+            "callback_cmdSeq",
+            "callback_response",
+        )
+    ]
+    shim = G.generate_component_shim(
+        ["M"],
+        "C",
+        [G.Port("receiveIn", G.PORT_KIND_SYNC, params)],
+        [G.Event("ExceededSeed", "WarningLow", [G.Param("seed", desc, False)])],
+        [G.Channel("Total", desc)],
+        [G.Command("SET", "Sync", params)],
+        "test.fpp",
+        "Test/C.hpp",
+        "Test/CGlue.h",
+    )
+    handlers = re.findall(
+        r"void C ::\w+_(?:handler|cmdHandler)\(([^)]*)\) \{(.*?)\n\}",
+        shim,
+        re.DOTALL,
+    )
+    assert len(handlers) == 2, shim
+    for parameters, body in handlers:
+        enclosing = {part.split()[-1] for part in parameters.split(",")}
+        callbacks = re.findall(r"= \[\]\(([^)]*)\) \{", body)
+        assert len(callbacks) == 3, body
+        for callback in callbacks:
+            names = [part.split()[-1] for part in callback.split(",")]
+            assert len(names) == len(set(names)), callback
+            assert not enclosing.intersection(names), (parameters, callback)
 
 
 def main():
