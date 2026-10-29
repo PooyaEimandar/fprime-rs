@@ -316,65 +316,64 @@ def test_seqgen_complex_args(fprime_test_api):
 
 
 def test_system_resources(fprime_test_api):
-    """Test system resources telemetry meets minimum thresholds"""
-    from fprime_gds.common.testing_fw import predicates
+    """Require resource telemetry with valid memory and CPU values."""
+    # Check the values in KB, not the number of channel updates received.
+    for channel in ("MEMORY_TOTAL", "MEMORY_USED", "NON_VOLATILE_TOTAL"):
+        fprime_test_api.assert_telemetry(
+            f"Ref.systemResources.{channel}",
+            value=predicates.greater_than(1),
+            timeout=10,
+        )
 
-    # Test memory usage > 1KB using predicates
-    pred_greater_than_1kb = predicates.greater_than(1)
-
-    # Wait for telemetry and verify it meets thresholds
-    fprime_test_api.await_telemetry_count(
-        pred_greater_than_1kb, "Ref.systemResources.MEMORY_TOTAL", timeout=3
-    )
-
-    fprime_test_api.await_telemetry_count(
-        pred_greater_than_1kb, "Ref.systemResources.MEMORY_USED", timeout=3
-    )
-
-    fprime_test_api.await_telemetry_count(
-        pred_greater_than_1kb, "Ref.systemResources.NON_VOLATILE_TOTAL", timeout=3
-    )
-
-    fprime_test_api.await_telemetry_count(
-        predicates.greater_than(1.0), "Ref.systemResources.CPU", timeout=3
+    # An idle host may legitimately report zero CPU utilization.
+    fprime_test_api.assert_telemetry(
+        "Ref.systemResources.CPU",
+        value=predicates.within_range(0.0, 100.0),
+        timeout=10,
     )
 
 
 def test_file_uplink_sandbox(fprime_test_api):
-    """Test that FileUplink sandbox rejects files outside the allowed directory.
+    """Test FileUplink sandbox enforcement (requires localhost testing).
 
     The Ref deployment configures FileUplink with sandbox directory /tmp/uplink/.
     Uploading to a path outside that directory should produce a FileOpenError event,
     and no FileReceived event.
     """
-    import os
     import tempfile
 
-    # Create the sandbox directory so in-sandbox uplinks succeed
-    os.makedirs("/tmp/uplink", exist_ok=True)
+    Path("/tmp/uplink").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="ref-uplink-", dir="/tmp") as outside:
+        with tempfile.TemporaryDirectory(dir="/tmp/uplink") as inside:
+            source = Path(outside) / "source.bin"
+            rejected = Path(outside) / "rejected.bin"
+            accepted = Path(inside) / "accepted.bin"
+            payload = bytes(range(64))
+            source.write_bytes(payload)
+            start = fprime_test_api.get_event_test_history().size()
 
-    # Create a small temporary file to uplink
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as f:
-        f.write(b"\x00" * 64)
-        local_file = f.name
+            # The parent exists and is writable: rejection must come from the sandbox.
+            fprime_test_api.uplink_file(str(source), destination=str(rejected))
+            fprime_test_api.assert_event(
+                "FileHandling.fileUplink.FileOpenError",
+                args=[str(rejected)],
+                start=start,
+                timeout=10,
+            )
 
-    try:
-        # --- Test 1: uplink to a path OUTSIDE the sandbox should fail ---
-        fprime_test_api.clear_histories()
-        fprime_test_api.uplink_file(local_file, destination="/tmp/evil/escaped.bin")
-
-        # Expect a FileOpenError warning because the path is outside /tmp/uplink/
-        fprime_test_api.await_event("FileHandling.fileUplink.FileOpenError", timeout=10)
-
-        # --- Test 2: uplink to a path INSIDE the sandbox should succeed ---
-        fprime_test_api.clear_histories()
-        fprime_test_api.uplink_file(local_file, destination="/tmp/uplink/test.bin")
-
-        fprime_test_api.await_event("FileHandling.fileUplink.FileReceived", timeout=10)
-    finally:
-        os.unlink(local_file)
-        # Clean up uploaded file
-        try:
-            os.unlink("/tmp/uplink/test.bin")
-        except OSError:
-            pass  # uploaded file may not exist; nothing to clean up
+            fprime_test_api.uplink_file(str(source), destination=str(accepted))
+            fprime_test_api.assert_event(
+                "FileHandling.fileUplink.FileReceived",
+                args=[str(accepted)],
+                start=start,
+                timeout=10,
+            )
+            assert accepted.read_bytes() == payload
+            assert not rejected.exists(), "FileUplink wrote outside its sandbox"
+            fprime_test_api.assert_event_count(
+                0,
+                events=fprime_test_api.get_event_pred(
+                    "FileHandling.fileUplink.FileReceived", args=[str(rejected)]
+                ),
+                start=start,
+            )
