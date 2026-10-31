@@ -33,6 +33,9 @@ FEATURE_BUILD_RESULT = cmake.get_build(
             / f"{TOOLCHAIN_NAME}.cmake"
         ),
         "FPRIME_PLATFORM": platform.system(),
+        # The Generic toolchain exercises cross-build plumbing; Rust currently
+        # builds for the host only and is outside this fixture's scope.
+        "FPRIME_ENABLE_RUST": "OFF",
     },
     make_targets=[
         "TestDeployment",

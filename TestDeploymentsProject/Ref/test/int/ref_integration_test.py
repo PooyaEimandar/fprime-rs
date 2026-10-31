@@ -169,9 +169,11 @@ def test_send_and_assert_no_op(fprime_test_api):
 def test_bd_cycles_ascending(fprime_test_api):
     """Test in-order block driver updates"""
     length = 60
+    # Ref's 1 Hz timer drives blockDrv through rate group 3's divisor of 4.
+    period = 4
     count_pred = predicates.greater_than(length - 1)
     results = fprime_test_api.await_telemetry_count(
-        count_pred, "Ref.blockDrv.BD_Cycles", timeout=length
+        count_pred, "Ref.blockDrv.BD_Cycles", timeout=length * period + 10
     )
     last = None
     reordered = False
@@ -180,7 +182,7 @@ def test_bd_cycles_ascending(fprime_test_api):
         if last is not None:
             last_time = last.get_time()
             result_time = result.get_time()
-            if result_time - last_time > 1.5:
+            if result_time - last_time > period * 1.5:
                 msg = "FSW didn't send an update between {} and {}".format(
                     last_time.to_readable(), result_time.to_readable()
                 )
@@ -210,9 +212,8 @@ def test_bd_cycles_ascending(fprime_test_api):
     )
     fprime_test_api.predicate_assert(
         count_pred,
-        len(results) - 1,
-        "Expected >= {} updates".format(length - 1),
-        True,
+        len(results),
+        "Expected >= {} updates".format(length),
     )
     fprime_test_api.assert_telemetry_count(0, "rateGroup1Comp.RgCycleSlips")
     assert case, "Expected all checks to pass (ascending, reordering). See log."

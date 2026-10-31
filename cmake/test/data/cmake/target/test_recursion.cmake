@@ -67,6 +67,19 @@ set(EXPECTED_FULL_DEPENDENCIES
     default_config
 )
 
+# Darwin overrides the POSIX semaphore and adds its shared platform helpers.
+if(FPRIME_PLATFORM STREQUAL "Darwin")
+    list(REMOVE_ITEM EXPECTED_FULL_DEPENDENCIES
+        Os_CountingSemaphore_Posix
+        Os_CountingSemaphore_Posix_Implementation
+    )
+    list(APPEND EXPECTED_FULL_DEPENDENCIES
+        Os_CountingSemaphore_Darwin
+        Os_CountingSemaphore_Darwin_Implementation
+        Os_Darwin_Shared
+    )
+endif()
+
 function(test_recursion_add_global_target TARGET)
 endfunction(test_recursion_add_global_target)
 
