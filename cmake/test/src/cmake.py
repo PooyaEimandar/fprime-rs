@@ -9,7 +9,7 @@ supplied. CMake is run as a command line call to the cmake system. Thus CMake mu
 """
 
 import multiprocessing
-import select
+from concurrent.futures import ThreadPoolExecutor
 import shutil
 import subprocess
 import sys
@@ -28,43 +28,28 @@ MAKE_ARGS = [f"-j{CPUS}"]
 def subprocess_helper(args, cwd):
     """Subprocess helper used to 'tee' the output to: console and capture"""
 
-    def read_available(proc, stdout, stderr):
-        """Read the available output from the process and return it"""
-
-        def capture_stream(stream, lines):
-            """Capture output from a stream, printing to console if needed"""
-            new_lines = stream.readlines()
-            lines[stream].extend(new_lines)
+    def capture_stream(stream, destination):
+        """Drain one pipe independently so neither pipe can block the child."""
+        lines = []
+        for line in stream:
+            lines.append(line)
             if "-s" in sys.argv or "--capture=no" in sys.argv:
-                for line in new_lines:
-                    print(
-                        line,
-                        end="",
-                        file=(sys.stdout if stream == stdout else sys.stderr),
-                    )
-
-        lines = {stdout: [], stderr: []}
-        while proc.poll() is None:
-            ready, _, _ = select.select([stdout, stderr], [], [])
-            for stream in ready:
-                capture_stream(stream, lines)
-        capture_stream(stdout, lines)
-        capture_stream(stderr, lines)
-        return (
-            proc.poll(),
-            [line for line in lines[stdout] if line.strip() != ""],
-            [line for line in lines[stderr] if line.strip() != ""],
-        )
+                print(line, end="", file=destination)
+        return [line for line in lines if line.strip() != ""]
 
     # Verbose output desired from pytest
-    proc = subprocess.Popen(
+    with subprocess.Popen(
         args=args,
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-    )
-    return read_available(proc, proc.stdout, proc.stderr)
+    ) as proc:
+        with ThreadPoolExecutor(max_workers=2) as readers:
+            stdout = readers.submit(capture_stream, proc.stdout, sys.stdout)
+            stderr = readers.submit(capture_stream, proc.stderr, sys.stderr)
+            output = stdout.result(), stderr.result()
+        return proc.wait(), output[0], output[1]
 
 
 def run_cmake(source_directory, build_path, options=None):
@@ -143,11 +128,10 @@ def get_build(
     make_targets=None,
     install_directory=None,
 ):
-    """Generate and build a cmake deployment, then returns a pytest fixture for it"""
+    """Return a fixture that generates and builds a deployment on first use."""
     base_cmake_arguments = {"FPRIME_SUB_BUILD_JOBS": f"{CPUS}"}
-    cmake_arguments = {} if cmake_arguments is None else cmake_arguments
+    cmake_arguments = {} if cmake_arguments is None else dict(cmake_arguments)
     cmake_arguments.update(base_cmake_arguments)
-    build_directory = Path(tempfile.mkdtemp())
     install_directory_calc = Path(
         Path(source_directory) / "build-artifacts"
         if install_directory is None
@@ -157,22 +141,24 @@ def get_build(
     if install_directory is not None:
         cmake_arguments["FPRIME_INSTALL_DEST"] = str(install_directory)
 
-    cmake_output = run_cmake(source_directory, build_directory, cmake_arguments)
-    target_outputs = {
-        target: run_make(build_directory, target) for target in make_targets
-    }
-
     @pytest.fixture(scope="session", name=fixture_name)
     def fixture_function():
-        yield {
-            "source": source_directory,
-            "build": build_directory,
-            "install": install_directory_calc,
-            "cmake": cmake_output,
-            "targets": target_outputs,
-        }
-        shutil.rmtree(build_directory, ignore_errors=True)
-        if install_directory is not None:
-            shutil.rmtree(install_directory, ignore_errors=True)
+        build_directory = Path(tempfile.mkdtemp())
+        try:
+            cmake_output = run_cmake(source_directory, build_directory, cmake_arguments)
+            target_outputs = {
+                target: run_make(build_directory, target) for target in make_targets
+            }
+            yield {
+                "source": source_directory,
+                "build": build_directory,
+                "install": install_directory_calc,
+                "cmake": cmake_output,
+                "targets": target_outputs,
+            }
+        finally:
+            shutil.rmtree(build_directory, ignore_errors=True)
+            if install_directory is not None:
+                shutil.rmtree(install_directory, ignore_errors=True)
 
     return fixture_function

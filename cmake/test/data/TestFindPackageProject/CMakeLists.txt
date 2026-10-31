@@ -16,7 +16,7 @@ register_fprime_project()
 if(NOT TEST_PLATFORM_LIBRARY_LOADED)
     message(FATAL_ERROR "Library platform file under lib/ was not loaded. "
         "Expected TEST_PLATFORM_LIBRARY_LOADED to be set by "
-        "lib/test-platform-library/cmake/platform/Linux.cmake")
+        "lib/test-platform-library/cmake/platform/${FPRIME_PLATFORM}.cmake")
 endif()
 
 register_fprime_deployment(
