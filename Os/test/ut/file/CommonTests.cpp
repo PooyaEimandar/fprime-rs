@@ -598,9 +598,7 @@ TEST_F(FunctionalIO, CrcHardcodedValue_Incremental) {
 // ======================================================================
 
 //! Create the test file, fill it with `content`, and reopen it for reading.
-static void write_then_reopen_for_read(Os::Test::FileTest::Tester& tester,
-                                       const U8* content,
-                                       FwSizeType length) {
+static void write_then_reopen_for_read(Os::Test::FileTest::Tester& tester, const U8* content, FwSizeType length) {
     Os::Test::FileTest::Tester::OpenFileCreate open_rule(false);
     open_rule.apply(tester);
 
@@ -609,8 +607,7 @@ static void write_then_reopen_for_read(Os::Test::FileTest::Tester& tester,
     ASSERT_EQ(written, length);
 
     tester.m_file.close();
-    ASSERT_EQ(Os::File::Status::OP_OK,
-              tester.m_file.open(tester.m_current_path.c_str(), Os::File::OPEN_READ));
+    ASSERT_EQ(Os::File::Status::OP_OK, tester.m_file.open(tester.m_current_path.c_str(), Os::File::OPEN_READ));
 }
 
 static void write_then_reopen_for_read(Os::Test::FileTest::Tester& tester, const char* content) {
@@ -667,8 +664,7 @@ TEST_F(FunctionalIO, ReadlineAtEndOfFileReturnsWhatItRead) {
 
     FwSizeType position = 0;
     ASSERT_EQ(Os::File::Status::OP_OK, tester->m_file.position(position));
-    ASSERT_EQ(position, static_cast<FwSizeType>(4))
-        << "the end-of-file path does not restore the original position";
+    ASSERT_EQ(position, static_cast<FwSizeType>(4)) << "the end-of-file path does not restore the original position";
     tester->m_file.close();
 }
 

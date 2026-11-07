@@ -16,9 +16,9 @@
 // and they are never odr-used.
 // ======================================================================
 
-#include "Svc/FrameAccumulator/FrameAccumulator.hpp"
 #include "Fw/FPrimeBasicTypes.hpp"
 #include "Fw/Types/Assert.hpp"
+#include "Svc/FrameAccumulator/FrameAccumulator.hpp"
 
 #include "Rust/RustSvc.h"
 

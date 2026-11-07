@@ -37,7 +37,6 @@ GpioPollAction classify_poll_result(int pollStatus, int pollErrno) {
     return GpioPollAction::REPORT_AND_BACK_OFF;
 }
 
-
 // ----------------------------------------------------------------------
 // Construction, initialization, and destruction
 // ----------------------------------------------------------------------

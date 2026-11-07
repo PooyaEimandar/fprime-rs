@@ -25,7 +25,6 @@
 
 namespace Drv {
 
-
 Os::File::Status errno_to_file_status(int errno_input) {
     Os::File::Status status = Os::File::Status::OTHER_ERROR;
     switch (errno_input) {
@@ -478,8 +477,7 @@ void LinuxGpioDriver ::pollLoop() {
             // than a microseconds-only one: Fw::TimeInterval::set asserts
             // useconds < 1e6, so a GPIO_POLL_TIMEOUT raised to 1000 would
             // fault on a form that did not split out the seconds.
-            (void)Os::Task::delay(
-                Fw::TimeInterval(GPIO_POLL_TIMEOUT / 1000, (GPIO_POLL_TIMEOUT % 1000) * 1000));
+            (void)Os::Task::delay(Fw::TimeInterval(GPIO_POLL_TIMEOUT / 1000, (GPIO_POLL_TIMEOUT % 1000) * 1000));
         }
     }
 }

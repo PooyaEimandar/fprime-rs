@@ -34,6 +34,8 @@ jobs:
     uses: ./.github/workflows/reusable-get-pr-branch.yml
     with:
       target_repository: fprime-community/fprime-zephyr-reference
+      # F Prime 4.3 compatibility baseline; newer devel needs post-4.3 APIs.
+      default_target_ref: 9b3a9b49eef17a5d172f7cf72f0ca9efddbd258c
 
   build:
     name: "Zephyr Build (all boards)"

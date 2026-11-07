@@ -78,7 +78,9 @@ def compare(cpp, rust):
         ),
         (
             "deserialize",
-            cpp_order(body_of(cpp, "SerializeStatus Buffer::deserializeFrom(", CPP.name)),
+            cpp_order(
+                body_of(cpp, "SerializeStatus Buffer::deserializeFrom(", CPP.name)
+            ),
             rust_order(body_of(rust, "pub fn deserialize_from(", RUST.name)),
         ),
     ]
@@ -115,7 +117,9 @@ def self_test():
             print(f"FAIL  self-test: anchor not found: {find!r}")
             return 1
         mutated = mutated.replace(find, replace, 1)
-    mutated = mutated.replace("self.SWAP", "self.offset").replace("let SWAP", "let offset")
+    mutated = mutated.replace("self.SWAP", "self.offset").replace(
+        "let SWAP", "let offset"
+    )
 
     if not disagrees(compare(cpp, mutated)):
         print("FAIL  self-test: a consistent same-width reorder was NOT caught")

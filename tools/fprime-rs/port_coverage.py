@@ -40,7 +40,9 @@ def load(build_dir):
             sources.add((locs.parent / match.group(1)).resolve())
     with tempfile.TemporaryDirectory() as tmp:
         try:
-            return G.run_fpp_to_json([locs.resolve()] + sorted(sources), pathlib.Path(tmp))
+            return G.run_fpp_to_json(
+                [locs.resolve()] + sorted(sources), pathlib.Path(tmp)
+            )
         except subprocess.CalledProcessError as exc:
             sys.exit(
                 "port_coverage: fpp-to-json failed:\n"

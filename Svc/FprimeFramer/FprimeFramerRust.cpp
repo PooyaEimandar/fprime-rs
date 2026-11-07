@@ -14,8 +14,8 @@
 
 #include <limits>
 
-#include "Svc/FprimeFramer/FprimeFramer.hpp"
 #include "Fw/Types/Assert.hpp"
+#include "Svc/FprimeFramer/FprimeFramer.hpp"
 #include "Svc/FprimeProtocol/FrameHeaderSerializableAc.hpp"
 #include "Svc/FprimeProtocol/FrameTrailerSerializableAc.hpp"
 

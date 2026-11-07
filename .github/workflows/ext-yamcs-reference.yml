@@ -32,7 +32,8 @@ jobs:
     uses: ./.github/workflows/reusable-get-pr-branch.yml
     with:
       target_repository: fprime-community/fprime-yamcs-reference
-      default_target_ref: main
+      # F Prime 4.3 compatibility baseline; newer main needs post-4.3 APIs.
+      default_target_ref: db9acfd548a0950aa50c06760cc9d338214f8986
 
   build:
     needs: get-branch
@@ -77,6 +78,30 @@ jobs:
           pip install "fprime-gds==4.2.2a4"
           pip install "fprime-xtce>=0.1.3"
           pip install "fprime-yamcs>=0.1.4"
+
+      - name: "Use Maven 3.10-compatible YAMCS launcher"
+        # fprime-yamcs 0.1.5 bundles plugin 1.3.5, which loses the dependency
+        # repositories with Maven 3.10. Upstream fixed this in plugin 1.3.11.
+        # https://github.com/yamcs/yamcs-maven-plugin/releases/tag/v1.3.11
+        run: |
+          python - <<'PY'
+          from importlib.metadata import distribution
+          import xml.etree.ElementTree as ET
+
+          pom = distribution("fprime-yamcs").locate_file("fprime_yamcs/yamcs/pom.xml")
+          namespace = {"m": "http://maven.apache.org/POM/4.0.0"}
+          tree = ET.parse(pom)
+          version = tree.find(
+              "./m:build/m:plugins/m:plugin[m:artifactId='yamcs-maven-plugin']/m:version",
+              namespace,
+          )
+          if version is None:
+              raise RuntimeError("YAMCS launcher plugin is missing from the packaged POM")
+          version.text = "1.3.11"
+          ET.register_namespace("", namespace["m"])
+          with pom.open("wb") as output:
+              tree.write(output, encoding="utf-8", xml_declaration=True)
+          PY
 
       # Upgrade GDS to a matching pr-xxxx branch if it exists; never fall back to devel
       - name: "Upgrade fprime-gds to pr-xxxx (if it exists)"

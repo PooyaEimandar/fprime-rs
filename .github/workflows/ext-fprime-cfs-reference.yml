@@ -31,6 +31,8 @@ jobs:
     uses: ./.github/workflows/reusable-get-pr-branch.yml
     with:
       target_repository: fprime-community/fprime_cfs_reference
+      # Current devel requires packet-context APIs newer than this framework.
+      default_target_ref: dac7f37184b7a80dcd4d989d77e00688bcf1484c
 
   build-and-test:
     name: "cFS Build and Integration Tests"
@@ -55,6 +57,17 @@ jobs:
           make SIMULATION=native prep
           make
           make install
+      - name: "Select the reference's ground transport"
+        id: transport
+        shell: bash
+        run: |
+          # Older release branches use the TCP bridge app. Current devel
+          # commands through ci_lab and receives to_lab telemetry over UDP.
+          if [ -f apps/fprime_gds/CMakeLists.txt ]; then
+            echo "args=--ip-client --ip-port 15010" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=--communication-selection cfs-lab --framing-selection cfs" >> "$GITHUB_OUTPUT"
+          fi
       - name: "Run Integration Tests"
         uses: nasa/fprime-actions/run-integration-tests@devel
         with:
@@ -63,7 +76,7 @@ jobs:
           binary: ./core-cpu1
           binary-args: ""
           gds-args: >-
-            --ip-client --ip-port 15010
+            ${{ steps.transport.outputs.args }}
             --dictionary ${{ github.workspace }}/build-artifacts/exe/Linux/fprime_app/dict/FPrimeDeploymentTopologyDictionary.json
           pytest-args: >-
             --dictionary ${{ github.workspace }}/build-artifacts/exe/Linux/fprime_app/dict/FPrimeDeploymentTopologyDictionary.json

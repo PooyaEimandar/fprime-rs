@@ -24,6 +24,7 @@
 #include <Os/FilePathUtils.hpp>
 #include <Os/FileSystem.hpp>
 #include <cstring>
+#include <limits>
 #include "Rust/RustOsKernel.h"
 
 // clang-format off
@@ -35,10 +36,10 @@
 // Rust reimplements, and are the reason this table exists at all.
 //
 //   Status resolvePath(const char*, const char*, char*, FwSizeType)                        37b926f8d386
-//   Status checkContainment(const char*, const char*)                                      1c604262bbf5
+//   Status checkContainment(const char*, const char*)                                      058c219d5508
 //   removed: static bool isValidCString(FwSizeType, FwSizeType)                            a239b9569452
-//   removed: static Status buildAbsolutePath(const char*, const char*, char*, FwSizeType)  0b1f03cde25d
-//   removed: static Status resolveInPlace(char*)                                           d07761397a8a
+//   removed: static Status buildAbsolutePath(const char*, const char*, char*, FwSizeType)  6f2961fc9954
+//   removed: static Status resolveInPlace(char*)                                           04351050273d
 // clang-format on
 
 static_assert(static_cast<int32_t>(Os::FilePathUtils::VALID) == 0, "Rust expects VALID == 0");
@@ -48,6 +49,9 @@ static_assert(static_cast<int32_t>(Os::FilePathUtils::TOO_LONG) == 3, "Rust expe
 
 namespace Os {
 namespace FilePathUtils {
+
+// All C-library byte counts below are bounded by this configured path size.
+static_assert(MAX_PATH_LENGTH <= std::numeric_limits<size_t>::max(), "Path length must fit size_t");
 
 Status resolvePath(const char* path, const char* baseDir, char* resolvedOut, FwSizeType resolvedSize) {
     // Asserted here rather than in Rust so that a null output buffer faults

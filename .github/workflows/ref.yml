@@ -113,6 +113,8 @@ jobs:
       - name: "Integration Tests"
         uses: nasa/fprime-actions/run-integration-tests@devel
         with:
+          # The block-driver test alone collects 60 samples at a four-second period.
+          timeout: "900"
           gds-working-directory: "TestDeploymentsProject"
           test-working-directory: "TestDeploymentsProject"
           binary: "build-artifacts/*/Ref/bin/Ref"

@@ -500,14 +500,12 @@ void ComQueue::processQueue() {
         // Dequeue deserializes the persisted Fw::ComBuffer from the queue's storage
         FW_ASSERT(this->m_buffer_state.load() == OWNED);
         auto dequeue_status = queue.dequeue(this->m_dequeued_com_buffer);
-        FW_ASSERT(dequeue_status == Fw::SerializeStatus::FW_SERIALIZE_OK,
-                  static_cast<FwAssertArgType>(dequeue_status));
+        FW_ASSERT(dequeue_status == Fw::SerializeStatus::FW_SERIALIZE_OK, static_cast<FwAssertArgType>(dequeue_status));
         this->sendComBuffer(this->m_dequeued_com_buffer, selected);
     } else {
         Fw::Buffer buffer;
         auto dequeue_status = queue.dequeue(buffer);
-        FW_ASSERT(dequeue_status == Fw::SerializeStatus::FW_SERIALIZE_OK,
-                  static_cast<FwAssertArgType>(dequeue_status));
+        FW_ASSERT(dequeue_status == Fw::SerializeStatus::FW_SERIALIZE_OK, static_cast<FwAssertArgType>(dequeue_status));
         this->sendBuffer(buffer, selected);
     }
 

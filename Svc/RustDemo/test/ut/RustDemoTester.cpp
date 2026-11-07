@@ -27,7 +27,6 @@ void RustDemoTester ::reset(U32 seed, bool enabled) {
     this->invoke_to_resetIn(0, seed, enabled);
 }
 
-
 U32 RustDemoTester::query(RustDemoKind kind) {
     return this->invoke_to_queryIn(0, kind);
 }

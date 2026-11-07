@@ -12,10 +12,10 @@
 // existing unit-test suite.
 // ======================================================================
 
-#include "Svc/FprimeRouter/FprimeRouter.hpp"
 #include "Fw/Com/ComPacket.hpp"
 #include "Fw/FPrimeBasicTypes.hpp"
 #include "Fw/Logger/Logger.hpp"
+#include "Svc/FprimeRouter/FprimeRouter.hpp"
 #include "config/ApidEnumAc.hpp"
 
 #include "Rust/RustSvc.h"
