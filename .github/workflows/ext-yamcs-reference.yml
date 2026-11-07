@@ -85,10 +85,10 @@ jobs:
         # https://github.com/yamcs/yamcs-maven-plugin/releases/tag/v1.3.11
         run: |
           python - <<'PY'
-          from importlib.resources import files
+          from importlib.metadata import distribution
           import xml.etree.ElementTree as ET
 
-          pom = files("fprime_yamcs").joinpath("yamcs", "pom.xml")
+          pom = distribution("fprime-yamcs").locate_file("fprime_yamcs/yamcs/pom.xml")
           namespace = {"m": "http://maven.apache.org/POM/4.0.0"}
           tree = ET.parse(pom)
           version = tree.find(
