@@ -606,7 +606,9 @@ def check_emitted_types_are_complete(model, wanted_modules):
             # structs carry (path, name, fields, defaults); arrays carry
             # (path, name, elt_desc, count, defaults).
             descs = (
-                [desc for _, desc, _ in entry[2]] if group is model.structs else [entry[2]]
+                [desc for _, desc, _ in entry[2]]
+                if group is model.structs
+                else [entry[2]]
             )
             for desc in descs:
                 if desc[0] != "named":
@@ -640,9 +642,7 @@ def collect_enum_constants(data, value_map):
         if value_node is None:
             value = implicit
         else:
-            value = resolve_int(
-                value_map, value_node, f"enum constant {const['name']}"
-            )
+            value = resolve_int(value_map, value_node, f"enum constant {const['name']}")
         implicit = value + 1
         constants[const["name"]] = value
     return constants
@@ -1015,7 +1015,11 @@ def emit_struct(model, path, name, fields, defaults, out):
         if count:
             out.append(f"        for item in self.{ident}.iter() {{")
             out.append(
-                emit_value_ser(desc, "*item" if desc[0] not in ("named", "mirror", "string") else "item", 12)
+                emit_value_ser(
+                    desc,
+                    "*item" if desc[0] not in ("named", "mirror", "string") else "item",
+                    12,
+                )
             )
             out.append("        }")
         else:
@@ -1125,7 +1129,11 @@ def emit_array(model, path, name, elt, count, default_elems, out):
         "    pub fn serialize_to(&self, buf: &mut SerBuffer<'_>, mode: Endianness) -> SerResult {"
     )
     out.append("        for item in self.0.iter() {")
-    out.append(emit_value_ser(elt, "*item" if elt[0] not in ("named", "mirror", "string") else "item", 12))
+    out.append(
+        emit_value_ser(
+            elt, "*item" if elt[0] not in ("named", "mirror", "string") else "item", 12
+        )
+    )
     out.append("        }")
     out.append("        Ok(())")
     out.append("    }")
@@ -1181,7 +1189,9 @@ def generate(model, module_name):
     def qualified(entry):
         return ".".join(list(entry[0]) + [entry[1]])
 
-    for path, name, repr_rust, constants, default_value in sorted(model.enums, key=qualified):
+    for path, name, repr_rust, constants, default_value in sorted(
+        model.enums, key=qualified
+    ):
         emit_enum(model, path, name, repr_rust, constants, default_value, out)
     for path, name, elt, count, default_elems in sorted(model.arrays, key=qualified):
         emit_array(model, path, name, elt, count, default_elems, out)
@@ -1841,7 +1851,9 @@ def cpp_epilogue(param):
         # `T`: Rust can hand back any integer, and a cast straight to a plain
         # enum is undefined behaviour for a value outside its range. The
         # generated class's SerialType constructor asserts validity first.
-        return [f"    {name} = {desc[3]}(static_cast<{desc[3]}::SerialType>(rs_{name}));"]
+        return [
+            f"    {name} = {desc[3]}(static_cast<{desc[3]}::SerialType>(rs_{name}));"
+        ]
     return []
 
 
@@ -2185,7 +2197,7 @@ def generate_env_rust(events, channels=(), commands=()):
             "    /// Answer a command. Every command handler must call this",
             "    /// exactly once: the dispatcher is waiting on it.",
             "    pub cmd_response: ",
-            "        Option<unsafe extern \"C\" fn(*mut c_void, "
+            '        Option<unsafe extern "C" fn(*mut c_void, '
             "FwOpcodeType, u32, u32)>,",
         ]
     out += (
@@ -2484,7 +2496,9 @@ def generate_component_hpp(
         args = "".join(f", {cpp_param_type(p)}" for p in port.params)
         ret = cpp_return_type(port.ret) if port.ret else "void"
         out.append(f"    //! Handler for input port {port.name} ({port.kind})")
-        out.append(f"    {ret} {port.name}_handler(FwIndexType portNum{args}) override;")
+        out.append(
+            f"    {ret} {port.name}_handler(FwIndexType portNum{args}) override;"
+        )
         out.append("")
     for command in commands:
         args = "".join(f", {cpp_param_type(p)}" for p in command.params)
@@ -2834,7 +2848,10 @@ def component_ast_kind(ast, node_id):
 
 
 def collect_phase_blocks(ast, instance_entry):
-    """The `phase Fpp.ToCpp.Phases.X """ + '"""..."""' + """` blocks on one instance.
+    (
+        """The `phase Fpp.ToCpp.Phases.X """
+        + '"""..."""'
+        + """` blocks on one instance.
 
     These are literal C++ pasted into the generated topology, and they are the
     one part of a topology that is *not* mechanical: nothing derives them, and
@@ -2843,6 +2860,7 @@ def collect_phase_blocks(ast, instance_entry):
     (`CdhCore::version.start()`), which is why a naive "active components ==
     start() calls" check does not hold.
     """
+    )
     specs = instance_entry.get("initSpecifierMap") or {}
     wanted = {entry["aNode"]["astNodeId"] for entry in specs.values()}
     if not wanted:

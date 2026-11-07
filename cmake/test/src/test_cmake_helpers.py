@@ -15,8 +15,11 @@ pytest_plugins = ["pytester"]
 
 
 @pytest.mark.parametrize("mode", ["collect", "skip", "run"])
-def test_build_fixture_lifecycle(pytester, mode):
+def test_build_fixture_lifecycle(pytester, monkeypatch, mode):
     """Collection and skipped tests must not configure or build a deployment."""
+    # pytester changes HOME. Preserve imports for pytest installed in the
+    # original user site, which would otherwise disappear in the child.
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(sys.path))
     test_module = f"""
 from pathlib import Path
 import runpy

@@ -1,0 +1,16 @@
+name: Coverage compatibility for fprime-tools 4.3
+description: Keep gcovr arguments out of CTest when coverage-common runs checks.
+runs:
+  using: composite
+  steps:
+    - name: Install coverage command adapter
+      shell: bash
+      env:
+        ADAPTER_PATH: ${{ github.action_path }}
+      run: |
+        python3 -m pytest -q "${ADAPTER_PATH}/test_adapter.py"
+        echo "FPRIME_UTIL_REAL=$(command -v fprime-util)" >> "$GITHUB_ENV"
+        mkdir -p "${RUNNER_TEMP}/fprime-coverage-bin"
+        cp "${ADAPTER_PATH}/adapter.py" "${RUNNER_TEMP}/fprime-coverage-bin/fprime-util"
+        chmod +x "${RUNNER_TEMP}/fprime-coverage-bin/fprime-util"
+        echo "${RUNNER_TEMP}/fprime-coverage-bin" >> "$GITHUB_PATH"

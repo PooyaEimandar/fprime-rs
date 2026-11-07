@@ -3,6 +3,12 @@
 Incremental Rust port of F´ components, keeping FPP as the source of truth and
 mixed C++/Rust deployments working at every step.
 
+Rust implementations currently require a native 64-bit static-library build
+and Cargo on `PATH`. Cross-compilation, 32-bit targets, and shared-library
+builds automatically select the existing C++ implementations, even when
+`FPRIME_ENABLE_RUST` is enabled. Cargo target selection and shared-library
+linking are not yet supported.
+
 ## Roadmap
 
 - [x] **Phase 0 — Skeleton**: cargo workspace, `fprime-config` generated from

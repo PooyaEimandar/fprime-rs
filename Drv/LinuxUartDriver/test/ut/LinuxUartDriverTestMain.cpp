@@ -30,6 +30,7 @@
 #include <pty.h>
 #endif
 
+#include <cerrno>
 #include <cstring>
 #include <string>
 
@@ -98,7 +99,7 @@ TEST(LinuxUartDriverWriteAll, WritesEveryByteOfALargeBuffer) {
 }
 
 TEST(LinuxUartDriverWriteAll, ReportsBytesWrittenWhenTheDeviceStopsAccepting) {
-    // A non-blocking pipe that is already full accepts a prefix and then
+    // A non-blocking pipe with one free page accepts a prefix and then
     // refuses the rest. The old send path reported this as a plain error and
     // said nothing about how much had gone out; the caller could neither
     // resend safely nor account for the loss.
@@ -106,26 +107,34 @@ TEST(LinuxUartDriverWriteAll, ReportsBytesWrittenWhenTheDeviceStopsAccepting) {
     ASSERT_EQ(::pipe(fds), 0);
     ASSERT_EQ(::fcntl(fds[1], F_SETFL, O_NONBLOCK), 0);
 
-    // Fill the pipe so only a prefix of the next write can be accepted
-    U8 filler[4096];
+    // Linux cannot reuse a pipe-buffer slot until its entire page is read.
+    // Draining only 256 bytes can leave no writable slot at all.
+    constexpr FwSizeType MAX_PAGE_SIZE = 64 * 1024;
+    const long pageSize = ::sysconf(_SC_PAGESIZE);
+    ASSERT_GT(pageSize, 0);
+    ASSERT_LE(pageSize, static_cast<long>(MAX_PAGE_SIZE));
+    const FwSizeType pageBytes = static_cast<FwSizeType>(pageSize);
+    U8 filler[MAX_PAGE_SIZE];
     memset(filler, 0xAA, sizeof filler);
     ssize_t accepted = 0;
     do {
-        accepted = ::write(fds[1], filler, sizeof filler);
+        accepted = ::write(fds[1], filler, pageBytes);
     } while (accepted > 0);
+    ASSERT_TRUE(errno == EAGAIN || errno == EWOULDBLOCK);
 
-    // Free a little room, then attempt a much larger write
-    U8 drain[256] = {0};
-    ASSERT_GT(::read(fds[0], drain, sizeof drain), 0);
+    // Free one complete page, then attempt to write two pages.
+    U8 drain[MAX_PAGE_SIZE] = {0};
+    ASSERT_EQ(::read(fds[0], drain, pageBytes), static_cast<ssize_t>(pageBytes));
 
-    U8 payload[8192];
+    U8 payload[2 * MAX_PAGE_SIZE];
     memset(payload, 0x5A, sizeof payload);
+    const FwSizeType payloadSize = 2 * pageBytes;
     FwSizeType written = 0;
-    const bool complete = Drv::LinuxUartDriver::writeAll(fds[1], payload, sizeof payload, written);
+    const bool complete = Drv::LinuxUartDriver::writeAll(fds[1], payload, payloadSize, written);
 
     ASSERT_FALSE(complete) << "a full pipe cannot accept the whole payload";
     ASSERT_GT(written, static_cast<FwSizeType>(0)) << "the prefix that was accepted must be reported";
-    ASSERT_LT(written, static_cast<FwSizeType>(sizeof payload));
+    ASSERT_LT(written, payloadSize);
 
     ::close(fds[0]);
     ::close(fds[1]);
@@ -152,8 +161,8 @@ TEST(LinuxUartDriverOpen, SucceedsOnAPseudoTerminal) {
     ASSERT_TRUE(pty.valid()) << "could not allocate a pseudo-terminal";
 
     Drv::LinuxUartDriver driver("uart");
-    ASSERT_TRUE(driver.open(pty.slavePath.c_str(), Drv::LinuxUartDriver::BAUD_9600,
-                            Drv::LinuxUartDriver::NO_FLOW, Drv::LinuxUartDriver::PARITY_NONE, 1024));
+    ASSERT_TRUE(driver.open(pty.slavePath.c_str(), Drv::LinuxUartDriver::BAUD_9600, Drv::LinuxUartDriver::NO_FLOW,
+                            Drv::LinuxUartDriver::PARITY_NONE, 1024));
 }
 
 TEST(LinuxUartDriverOpen, FailsOnAMissingDevice) {

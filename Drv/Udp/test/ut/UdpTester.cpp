@@ -46,7 +46,7 @@ void UdpTester::test_with_loop(U32 iterations, bool recv_thread, bool send_only)
     ASSERT_NE(port1, port2);
 
     // Configure the component
-    this->component.configureSend("127.0.0.1", port1, 0, 100);
+    this->component.configureSend("127.0.0.1", port1, 0, Drv::Test::SOCKET_RECV_TIMEOUT_US);
     if (not send_only) {
         this->component.configureRecv("127.0.0.1", port2);
     }

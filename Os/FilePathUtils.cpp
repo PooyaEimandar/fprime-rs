@@ -7,9 +7,13 @@
 #include <Os/FilePathUtils.hpp>
 #include <Os/FileSystem.hpp>
 #include <cstring>
+#include <limits>
 
 namespace Os {
 namespace FilePathUtils {
+
+// All C-library byte counts below are bounded by this configured path size.
+static_assert(MAX_PATH_LENGTH <= std::numeric_limits<size_t>::max(), "Path length must fit size_t");
 
 // Helper: validate that string_length did not return the buffer size
 // (which indicates no null terminator was found — an invalid string).
@@ -43,12 +47,12 @@ static Status buildAbsolutePath(const char* path, const char* baseDir, char* res
         if ((baseDirLen + needsSlash + pathLen + 1) > resolvedSize) {
             return TOO_LONG;
         }
-        (void)std::memcpy(resolvedOut, baseDir, baseDirLen);
+        (void)std::memcpy(resolvedOut, baseDir, static_cast<size_t>(baseDirLen));
         FwSizeType pos = baseDirLen;
         if (needsSlash) {
             resolvedOut[pos++] = '/';
         }
-        (void)std::memcpy(&resolvedOut[pos], path, pathLen);
+        (void)std::memcpy(&resolvedOut[pos], path, static_cast<size_t>(pathLen));
         pos += pathLen;
         resolvedOut[pos] = '\0';
     } else {
@@ -59,7 +63,7 @@ static Status buildAbsolutePath(const char* path, const char* baseDir, char* res
         if (pathLen + 1 > resolvedSize) {
             return TOO_LONG;
         }
-        (void)std::memcpy(resolvedOut, path, pathLen + 1);
+        (void)std::memcpy(resolvedOut, path, static_cast<size_t>(pathLen + 1));
     }
     return VALID;
 }
@@ -120,7 +124,7 @@ static Status resolveInPlace(char* resolvedOut) {
         }
 
         // Normal segment: shift left to writePos
-        (void)std::memmove(&resolvedOut[writePos], &resolvedOut[segStart], segLen);
+        (void)std::memmove(&resolvedOut[writePos], &resolvedOut[segStart], static_cast<size_t>(segLen));
         writePos += segLen;
         resolvedOut[writePos++] = '/';
     }
@@ -195,7 +199,7 @@ Status checkContainment(const char* resolvedPath, const char* allowedDirectory) 
     // Special case: path equals the allowed directory without trailing '/'.
     // e.g. path="/data/uplink" matches allowedDirectory="/data/uplink/"
     // This is valid because the path IS the sandbox directory itself.
-    if (pathLen == allowedLen - 1 && std::memcmp(resolvedPath, allowedDirectory, pathLen) == 0) {
+    if (pathLen == allowedLen - 1 && std::memcmp(resolvedPath, allowedDirectory, static_cast<size_t>(pathLen)) == 0) {
         return VALID;
     }
 
@@ -203,7 +207,7 @@ Status checkContainment(const char* resolvedPath, const char* allowedDirectory) 
     if (pathLen < allowedLen) {
         return OUTSIDE_SANDBOX;
     }
-    if (std::memcmp(resolvedPath, allowedDirectory, allowedLen) != 0) {
+    if (std::memcmp(resolvedPath, allowedDirectory, static_cast<size_t>(allowedLen)) != 0) {
         return OUTSIDE_SANDBOX;
     }
     return VALID;

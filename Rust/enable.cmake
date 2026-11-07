@@ -85,21 +85,24 @@ endif()
 
 set(FPRIME_RS_AVAILABLE FALSE)
 if (FPRIME_ENABLE_RUST)
-    find_program(FPRIME_CARGO cargo)
-    if (FPRIME_CARGO)
-        set(FPRIME_RS_AVAILABLE TRUE)
-    elseif (NOT FPRIME_IS_SUB_BUILD)
-        message(STATUS "fprime-rs: cargo not found; skipping Rust components (set FPRIME_ENABLE_RUST=OFF to silence)")
+    # Cargo currently builds a host archive with a 64-bit ABI. Rust_Codec
+    # also relies on a static-library cycle with Fw_Types. Select the C++
+    # implementations consistently in main and sub-builds when unsupported.
+    if (CMAKE_CROSSCOMPILING OR BUILD_SHARED_LIBS OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        if (NOT FPRIME_IS_SUB_BUILD)
+            message(STATUS "fprime-rs: Rust requires a native 64-bit static build; using C++ implementations")
+        endif()
+    else()
+        find_program(FPRIME_CARGO cargo)
+        if (FPRIME_CARGO)
+            set(FPRIME_RS_AVAILABLE TRUE)
+        elseif (NOT FPRIME_IS_SUB_BUILD)
+            message(STATUS "fprime-rs: cargo not found; skipping Rust components (set FPRIME_ENABLE_RUST=OFF to silence)")
+        endif()
     endif()
 endif()
 
 if (FPRIME_RS_AVAILABLE)
-    if (CMAKE_CROSSCOMPILING AND NOT FPRIME_IS_SUB_BUILD)
-        message(WARNING
-            "fprime-rs: cargo cross-compilation is not wired yet; libfprime_rust.a is built for the HOST "
-            "architecture and linking will fail. Configure with -DFPRIME_ENABLE_RUST=OFF for cross builds.")
-    endif()
-
     set(FPRIME_RUST_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/Cargo.toml")
     set(FPRIME_RUST_WORKSPACE_DIR "${CMAKE_CURRENT_LIST_DIR}")
     set(FPRIME_RUST_TARGET_DIR "${CMAKE_BINARY_DIR}/fprime-rust-target")

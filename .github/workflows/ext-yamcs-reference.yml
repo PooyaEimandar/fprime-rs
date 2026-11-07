@@ -32,7 +32,8 @@ jobs:
     uses: ./.github/workflows/reusable-get-pr-branch.yml
     with:
       target_repository: fprime-community/fprime-yamcs-reference
-      default_target_ref: main
+      # F Prime 4.3 compatibility baseline; newer main needs post-4.3 APIs.
+      default_target_ref: db9acfd548a0950aa50c06760cc9d338214f8986
 
   build:
     needs: get-branch

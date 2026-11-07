@@ -433,7 +433,10 @@ def a_filter_that_hides_a_referenced_type_is_refused():
 
     # Widening the filter is exactly the fix the message names.
     model = build(source, ["Keep", "Other"])
-    assert sorted(n for _, n, *_ in model.structs) == ["Holder", "Payload"], model.structs
+    assert sorted(n for _, n, *_ in model.structs) == [
+        "Holder",
+        "Payload",
+    ], model.structs
 
 
 @case
@@ -559,9 +562,7 @@ def a_struct_literal_default_is_folded():
         }
         """
     )
-    _, _, _, count, defaults = next(
-        a for a in model.arrays if a[1] == "Entries"
-    )
+    _, _, _, count, defaults = next(a for a in model.arrays if a[1] == "Entries")
     assert count == 2, count
     assert defaults is not None and len(defaults) == 2, defaults
     rendered = G.generate(model, "m")
@@ -592,7 +593,9 @@ def an_array_default_named_by_a_constant_is_not_broadcast():
     assert len(defaults) == 2, defaults
     rendered = G.generate(model, "m")
     # Element-wise: two distinct rows, not the same value twice.
-    assert "MRow([1, 2])" in rendered, rendered[rendered.find("impl Default for MTable"):][:300]
+    assert "MRow([1, 2])" in rendered, rendered[
+        rendered.find("impl Default for MTable") :
+    ][:300]
     assert "MRow([3, 4])" in rendered
 
 
@@ -667,7 +670,9 @@ def a_string_default_is_folded():
         """
     )
     rendered = G.generate(model, "m")
-    assert 'FwString::<8>::from_bytes(b"hi")' in rendered, rendered[rendered.find("impl Default for MNamed"):][:300]
+    assert 'FwString::<8>::from_bytes(b"hi")' in rendered, rendered[
+        rendered.find("impl Default for MNamed") :
+    ][:300]
 
 
 # ---------------------------------------------------------------------------
@@ -739,7 +744,9 @@ def a_ref_enum_is_written_back_through_serial_type():
         }
         """
     )
-    assert "outcome = Status(static_cast<Status::SerialType>(rs_outcome));" in shim, shim
+    assert (
+        "outcome = Status(static_cast<Status::SerialType>(rs_outcome));" in shim
+    ), shim
     assert "static_cast<Status::T>" not in shim, shim
 
 

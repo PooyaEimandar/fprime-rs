@@ -63,6 +63,8 @@ jobs:
         with:
           run-check: 'false'
           jobs: random
+      - name: "Adapt coverage CLI for pinned tools"
+        uses: ./.github/actions/coverage-compat
       - name: "Coverage (common)"
         id: cov
         uses: nasa/fprime-actions/coverage-common@devel

@@ -13,6 +13,8 @@ namespace Drv {
 namespace Test {
 
 static constexpr U16 MAX_ITER = 10;
+// Keep polling bounded without flooding fixed-size tester histories on a busy runner.
+static constexpr U32 SOCKET_RECV_TIMEOUT_US = 50000;
 /**
  * Force a receive timeout on a socket such that it will not hang our testing despite the normal recv behavior of
  * "block forever" until it gets data.

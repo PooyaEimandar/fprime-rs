@@ -27,7 +27,7 @@ void TcpServerTester ::setup_helper(bool recv_thread, bool reconnect, bool expec
     Drv::SocketIpStatus status1 = Drv::SOCK_SUCCESS;
     U16 port = 0;
     EXPECT_FALSE(component.isStarted());
-    status1 = this->component.configure("127.0.0.1", port, 0, 100);
+    status1 = this->component.configure("127.0.0.1", port, 0, Drv::Test::SOCKET_RECV_TIMEOUT_US);
     EXPECT_EQ(status1, Drv::SOCK_SUCCESS);
     // Start up a receive thread
     if (recv_thread) {

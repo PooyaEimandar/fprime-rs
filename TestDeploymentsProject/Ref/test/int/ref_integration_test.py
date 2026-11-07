@@ -254,7 +254,17 @@ def test_active_logger_filter(fprime_test_api):
         fprime_test_api.assert_event_count(zero, cmd_events)
         fprime_test_api.assert_event_count(pred, actHI_events)
     finally:
-        set_default_filters(fprime_test_api)
+        # Restore only the filter changed above and wait for completion.
+        # Resetting all six filters in a burst can fill the event queue and
+        # drop the next test's command-dispatched event.
+        command = "CdhCore.events.SET_EVENT_FILTER"
+        completed = fprime_test_api.get_event_pred(
+            "CdhCore.cmdDisp.OpCodeCompleted",
+            [fprime_test_api.translate_command_name(command)],
+        )
+        fprime_test_api.send_and_assert_event(
+            command, ["COMMAND", "ENABLED"], events=completed
+        )
 
 
 def test_signal_generation(fprime_test_api):

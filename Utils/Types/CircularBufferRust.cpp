@@ -56,9 +56,8 @@ FwSizeType CircularBuffer ::advance_idx(FwSizeType idx, FwSizeType amount) const
 Fw::SerializeStatus CircularBuffer ::serialize(const U8* const buffer, const FwSizeType size) {
     FW_ASSERT(m_store != nullptr && m_store_size != 0);  // setup method was called
     FW_ASSERT(buffer != nullptr);
-    return static_cast<Fw::SerializeStatus>(fprime_rs_cb_serialize(m_store, m_store_size, &m_head_idx,
-                                                                   &m_allocated_size, &m_high_water_mark, buffer,
-                                                                   size));
+    return static_cast<Fw::SerializeStatus>(fprime_rs_cb_serialize(
+        m_store, m_store_size, &m_head_idx, &m_allocated_size, &m_high_water_mark, buffer, size));
 }
 
 template <typename T>
